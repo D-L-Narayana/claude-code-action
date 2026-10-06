@@ -6,7 +6,8 @@ Thank you for your interest in contributing to Claude Code Action! This document
 
 ### Prerequisites
 
-- [Bun](https://bun.sh/) runtime
+- [Bun](https://bun.sh/) runtime (the version pinned in `action.yml`)
+- [uv](https://docs.astral.sh/uv/) (only for the Python tests of `agent-approval-check/`)
 - [Docker](https://www.docker.com/) (for running GitHub Actions locally)
 - [act](https://github.com/nektos/act) (installed automatically by our test script)
 - An Anthropic API key (for testing)
@@ -20,11 +21,13 @@ Thank you for your interest in contributing to Claude Code Action! This document
    cd claude-code-action
    ```
 
-2. Install dependencies:
+2. Install dependencies exactly as locked:
 
    ```bash
-   bun install
+   bun install --frozen-lockfile
    ```
+
+   Do not commit changes to `bun.lock` unless you intentionally changed a dependency.
 
 3. Set up your Anthropic API key:
    ```bash
@@ -36,7 +39,8 @@ Thank you for your interest in contributing to Claude Code Action! This document
 ### Available Scripts
 
 - `bun test` - Run all tests
-- `bun run typecheck` - Type check the code
+- `bun test test/<file>.test.ts` - Run a single test file (fast; use this while iterating)
+- `bun run typecheck` - Type check the code (strict: unused locals and parameters fail the check)
 - `bun run format` - Format code with Prettier
 - `bun run format:check` - Check code formatting
 
@@ -44,11 +48,29 @@ Thank you for your interest in contributing to Claude Code Action! This document
 
 ### Running Tests Locally
 
-1. **Unit Tests**:
+1. **Unit tests** (TypeScript, Bun):
 
    ```bash
-   bun test
+   bun test                                  # everything
+   bun test test/sanitizer.test.ts           # a single file
+   bun test base-action/test/readme.test.ts  # base-action tests live in base-action/test
    ```
+
+2. **Python tests** for the `agent-approval-check` action:
+
+   ```bash
+   uv run --with-requirements agent-approval-check/requirements-dev.txt pytest -q agent-approval-check/tests
+   ```
+
+### Drift Tests
+
+Some test files exist only to keep `action.yml`, the source, the docs and the example workflows consistent with each other. If you change an input, an output, a pinned version, a documentation table or an example workflow, expect one of these to fail until the other side is updated too:
+
+- `test/action-metadata.test.ts` - `action.yml` inputs and outputs match the code (`src/entrypoints/run.ts`) and the input reference in `docs/usage.md`
+- `test/version-pins.test.ts` - pinned versions (Claude Code, Bun, input defaults) are the same everywhere they appear
+- `test/examples-workflows.test.ts` - example workflows in `examples/` and `base-action/examples/` follow the checkout version and permissions rules
+- `test/docs-consistency.test.ts` - the docs do not use removed inputs in workflow examples and the FAQ lists every built-in MCP server
+- `base-action/test/readme.test.ts` - the input table in `base-action/README.md` matches `base-action/action.yml`
 
 ## Pull Request Process
 

@@ -61,3 +61,21 @@ For specialized use cases, you can fine-tune behavior using `claude_args`:
       --system-prompt "You are a code review specialist"
     anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
+
+## Simplified Tag-Mode Prompt
+
+Setting `USE_SIMPLE_PROMPT: "true"` in the calling workflow's job-level `env:` block switches tag mode to a shorter prompt. It carries the same GitHub context as the default prompt (issue/PR body, comments, review comments, changed files, all subject to the same [size budget](./limits.md#prompt-context-tag-mode)) but with condensed instructions. The default prompt remains the supported one; use this variant to compare Claude's behavior on your repository.
+
+```yaml
+jobs:
+  claude-response:
+    runs-on: ubuntu-latest
+    env:
+      USE_SIMPLE_PROMPT: "true"
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Like every environment variable the action reads, it has to be set at the job or workflow level — see [Workflow-Level Environment Variables](./configuration.md#workflow-level-environment-variables).

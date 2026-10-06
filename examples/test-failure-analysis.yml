@@ -12,7 +12,9 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  actions: write # gh workflow run (retry step)
+  pull-requests: write # gh pr comment (comment step)
+  id-token: write # default GitHub App authentication (no github_token input)
 
 jobs:
   detect-flaky:
@@ -20,13 +22,17 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'failure' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Detect flaky test failures
         id: detect
-        uses: anthropics/claude-code-action@main
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Claude reads the failed run's logs with `gh run view`, which needs
+          # `actions: read` on the token Claude operates with.
+          additional_permissions: |
+            actions: read
           prompt: |
             The CI workflow failed: ${{ github.event.workflow_run.html_url }}
 
@@ -44,6 +50,7 @@ jobs:
             - confidence: number 0-1 indicating confidence level
             - summary: brief one-sentence explanation
           claude_args: |
+            --allowedTools "Bash(gh run view:*)"
             --json-schema '{"type":"object","properties":{"is_flaky":{"type":"boolean","description":"Whether this appears to be a flaky test failure"},"confidence":{"type":"number","minimum":0,"maximum":1,"description":"Confidence level in the determination"},"summary":{"type":"string","description":"One-sentence explanation of the failure"}},"required":["is_flaky","confidence","summary"]}'
 
       # Auto-retry only if flaky AND high confidence (>= 0.7)

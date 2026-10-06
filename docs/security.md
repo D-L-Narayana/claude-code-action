@@ -10,7 +10,7 @@
   - If you need `'*'`, scope workflow `permissions:` to the minimum required
 - **⚠️ Non-Write User Access (RISKY)**: The `allowed_non_write_users` parameter allows bypassing the write permission requirement. **This is a significant security risk and should only be used for workflows with extremely limited permissions** (e.g., issue labeling workflows that only have `issues: write` permission). This feature:
   - Only works when `github_token` is provided as input (not with GitHub App authentication)
-  - Accepts either a comma-separated list of specific usernames or `*` to allow all users
+  - Accepts either a comma-separated list of specific usernames (matched case-insensitively) or `*` to allow all users
   - **Should be used with extreme caution** as it bypasses the primary security mechanism of this action
   - Is designed for automation workflows where user permissions are already restricted by the workflow's permission scope
   - When set, Claude does a best-effort scrub of Anthropic, cloud, and GitHub Actions secrets from subprocess environments. On Linux runners with bubblewrap available, subprocesses additionally run with PID-namespace isolation. This reduces but does not eliminate prompt injection risk — keep workflow permissions minimal and validate all outputs. Set `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: 0` in your workflow or job `env:` block to opt out.
@@ -75,9 +75,17 @@ This design ensures that users retain full control over what pull requests are c
 
 ## ⚠️ Prompt Injection Risks
 
-**Beware of potential hidden markdown when tagging Claude on untrusted content.** External contributors may include hidden instructions through HTML comments, invisible characters, hidden attributes, or other techniques. The action sanitizes content by stripping HTML comments, invisible characters, markdown image alt text, hidden HTML attributes, and HTML entities, but new bypass techniques may emerge. We recommend reviewing the raw content of all input coming from external contributors before allowing Claude to process it.
+**Beware of potential hidden markdown when tagging Claude on untrusted content.** External contributors may include hidden instructions through HTML comments, invisible characters, hidden attributes, or other techniques. The action sanitizes content by stripping HTML comments, invisible characters (zero-width and bidirectional control characters, Unicode TAG characters, word joiners and variation selectors), markdown image alt text, hidden HTML attributes, and HTML entities, but new bypass techniques may emerge. We recommend reviewing the raw content of all input coming from external contributors before allowing Claude to process it.
 
 On public repos, you can also use `include_comments_by_actor` to allowlist which users' comments are passed to Claude, reducing exposure to untrusted input. Use `exclude_comments_by_actor` to filter out noisy bot comments (e.g., `dependabot[bot]`, `renovate[bot]`). If an actor matches both lists, exclusion takes priority. See [Usage](./usage.md) for details.
+
+## Secret Redaction
+
+Text the action posts on your behalf — the tracking comment, inline comments, the step-summary report and error messages — is scanned for well-known credential formats before it leaves the runner. GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`), Anthropic API keys and OAuth tokens, AWS access key IDs, Slack tokens, JWTs, Google API keys, GitLab personal access tokens, npm tokens, and credentials embedded in URLs (`https://user:token@host/…`) are replaced with `[REDACTED_…]` placeholders. Redaction is best-effort and pattern-based: keep secrets out of Claude's reach (see the Full Output Security Warning below) rather than relying on it.
+
+## Inline Comment Buffering
+
+When `classify_inline_comments` is enabled (the default), inline review comments that Claude creates without `confirmed: true` are not posted immediately. They are buffered to `$RUNNER_TEMP/claude-inline-comments/<owner>__<repo>__pr<N>__run<RUN_ID>.jsonl` — a file scoped to the repository, pull request and workflow run — and classified after the session by a separate `always()` post-step, which posts the real review comments and drops test/probe comments. The post-step reads only the current run's buffer, tolerates malformed lines, and deletes the buffer after processing, so stale entries on non-ephemeral (self-hosted) runners cannot be replayed into a different pull request or a later run. The classifier uses `claude-haiku-4-5` by default; set `CLAUDE_INLINE_CLASSIFIER_MODEL` in the calling workflow's job-level `env:` block to use a different model (see [Workflow-Level Environment Variables](./configuration.md#workflow-level-environment-variables)). Set `classify_inline_comments: 'false'` to post every inline comment immediately instead.
 
 ## GitHub App Permissions
 
@@ -107,7 +115,7 @@ By default, commits made by Claude are unsigned. You can enable commit signing u
 This uses GitHub's API to create commits, which automatically signs them as verified from the GitHub App:
 
 ```yaml
-- uses: anthropics/claude-code-action@main
+- uses: anthropics/claude-code-action@v1
   with:
     use_commit_signing: true
 ```
@@ -119,7 +127,7 @@ This is the simplest option and requires no additional setup. However, because i
 This uses an SSH key to sign commits via git CLI. Use this option when you need both signed commits AND standard git operations (rebasing, cherry-picking, etc.):
 
 ```yaml
-- uses: anthropics/claude-code-action@main
+- uses: anthropics/claude-code-action@v1
   with:
     ssh_signing_key: ${{ secrets.SSH_SIGNING_KEY }}
     bot_id: "YOUR_GITHUB_USER_ID"

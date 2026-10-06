@@ -1,11 +1,7 @@
 import { mkdir, rm, writeFile } from "fs/promises";
 import { prepareMcpConfig } from "../../mcp/install-mcp-server";
 import { parseAllowedTools } from "./parse-tools";
-import {
-  configureGitAuth,
-  replaceCheckoutCredentials,
-  setupSshSigning,
-} from "../../github/operations/git-config";
+import { configureGitAuthForMode } from "../shared/git-auth";
 import { checkHumanActor } from "../../github/validation/actor";
 import type { GitHubContext } from "../../github/context";
 import type { Octokits } from "../../github/api/client";
@@ -29,51 +25,9 @@ export async function prepareAgentMode({
   // Check if actor is human (prevents bot-triggered loops)
   await checkHumanActor(octokit.rest, context);
 
-  // Configure git authentication for agent mode (same as tag mode)
-  // SSH signing takes precedence if provided
-  const useSshSigning = !!context.inputs.sshSigningKey;
-  const useApiCommitSigning = context.inputs.useCommitSigning && !useSshSigning;
-
-  if (useSshSigning) {
-    // Setup SSH signing for commits
-    await setupSshSigning(context.inputs.sshSigningKey);
-
-    // Still configure git auth for push operations (user/email and remote URL)
-    const user = {
-      login: context.inputs.botName,
-      id: parseInt(context.inputs.botId),
-    };
-    try {
-      await configureGitAuth(githubToken, context, user);
-    } catch (error) {
-      console.error("Failed to configure git authentication:", error);
-      // Continue anyway - git operations may still work with default config
-    }
-  } else if (!useApiCommitSigning) {
-    // Use bot_id and bot_name from inputs directly
-    const user = {
-      login: context.inputs.botName,
-      id: parseInt(context.inputs.botId),
-    };
-
-    try {
-      // Use the shared git configuration function
-      await configureGitAuth(githubToken, context, user);
-    } catch (error) {
-      console.error("Failed to configure git authentication:", error);
-      // Continue anyway - git operations may still work with default config
-    }
-  } else {
-    // Commits go through the GitHub API, so no git user setup is needed, but
-    // the credential actions/checkout left in git config should still be
-    // replaced with the action's own.
-    try {
-      await replaceCheckoutCredentials(githubToken, context);
-    } catch (error) {
-      console.error("Failed to configure git credentials:", error);
-      // Continue anyway - git operations may still work with default config
-    }
-  }
+  // Configure git authentication (shared with tag mode). Agent mode tolerates
+  // a missing checkout; every other failure aborts the prepare phase.
+  await configureGitAuthForMode({ context, githubToken, mode: "agent" });
 
   // Create prompt directory. Clear any stale files from a prior invocation first —
   // see src/create-prompt/index.ts for context (non-ephemeral self-hosted runners

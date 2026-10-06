@@ -18,7 +18,7 @@ You can add custom MCP (Model Context Protocol) servers to extend Claude's capab
 
 ### Passing Secrets to MCP Servers
 
-For MCP servers that require sensitive information like API keys or tokens, you can create a configuration file with GitHub Secrets:
+For MCP servers that require sensitive information like API keys or tokens, you can create a configuration file with GitHub Secrets. The file is read at startup and merged with the action's built-in servers (see the notes below), so the secrets never have to appear in `claude_args`:
 
 ```yaml
 - name: Create MCP Config
@@ -104,8 +104,53 @@ You can add multiple MCP servers by using multiple `--mcp-config` flags:
 **Important**:
 
 - Always use GitHub Secrets (`${{ secrets.SECRET_NAME }}`) for sensitive values like API keys, tokens, or passwords. Never hardcode secrets directly in the workflow file.
-- Your custom servers will override any built-in servers with the same name.
-- The `claude_args` supports multiple `--mcp-config` flags that will be merged together.
+- `--mcp-config` accepts either inline JSON or a path to a JSON file, and may be repeated. Every value — files included — is read and merged with the built-in GitHub server configs before Claude starts.
+- Later values win on name collisions, so a custom server with the same name as a built-in one (`github_comment`, `github_file_ops`, `github_inline_comment`, `github_ci`, `github`) replaces it.
+- A file that cannot be read or does not contain valid JSON fails the run with a clear error instead of being silently ignored; the same applies to an inline value that is not valid JSON whenever it is merged with other configs (always in tag mode).
+
+## Prompt Size Budget
+
+In tag mode the action builds Claude's prompt from the issue or PR body, the comments, the reviews with their diff hunks, and the list of changed files. Each part has a character budget so that very large threads cannot overflow the model context; the newest comments are kept when the comments section is over budget, every cut is marked in the prompt text, and the instruction part of the prompt is never truncated. The defaults are listed in [Limits and Safeguards](./limits.md#prompt-context-tag-mode).
+
+To change the budget, set `CLAUDE_PROMPT_MAX_CHARS` in the calling workflow's job-level `env:` block (see [Workflow-Level Environment Variables](#workflow-level-environment-variables) for why it cannot go under `with:`). All section budgets scale proportionally with the total:
+
+```yaml
+jobs:
+  claude-response:
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_PROMPT_MAX_CHARS: "600000" # doubles every section budget
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+## Workflow-Level Environment Variables
+
+A few behaviors are tuned through environment variables rather than inputs. This is a composite action: each internal step has its own `env:` block, which shadows the environment of the calling workflow, so the action forwards every variable it reads explicitly from the `env` context. For that forwarding to see your value, set it in the calling workflow's **job-level** (or workflow-level) `env:` block, or export it from an earlier step via `$GITHUB_ENV`. Values placed under the action step's `with:` are not inputs and are ignored.
+
+| Variable                                                      | Effect                                                                                                                                                                                                   |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE_PROMPT_MAX_CHARS`                                     | Total character budget for the tag-mode prompt context; every section budget scales with it. Defaults in [Limits](./limits.md#prompt-context-tag-mode)                                                   |
+| `USE_SIMPLE_PROMPT`                                           | `"true"` switches tag mode to a shorter prompt variant with the same GitHub context but condensed instructions. Experimental — see [Experimental Features](./experimental.md#simplified-tag-mode-prompt) |
+| `CLAUDE_INLINE_CLASSIFIER_MODEL`                              | Model used by the post-step that classifies buffered inline comments as real review vs. test/probe (default `claude-haiku-4-5`). See [Security](./security.md#inline-comment-buffering)                  |
+| `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS`    | Forwarded unchanged to the Claude Code CLI (MCP server startup timeout, tool call timeout, and maximum MCP tool output size, per the Claude Code documentation)                                          |
+| `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `CLAUDE_CODE_SCRIPT_CAPS` | Subprocess isolation controls used together with `allowed_non_write_users`. See [Security](./security.md#access-control)                                                                                 |
+
+```yaml
+jobs:
+  claude-response:
+    runs-on: ubuntu-latest
+    env:
+      CLAUDE_PROMPT_MAX_CHARS: "600000"
+      CLAUDE_INLINE_CLASSIFIER_MODEL: "claude-sonnet-4-5"
+      MCP_TIMEOUT: "30000"
+    steps:
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
 
 ## Additional Permissions for CI/CD Integration
 
@@ -273,7 +318,19 @@ For provider-specific models:
     claude_args: |
       --model claude-4-0-sonnet@20250805
     # ... other inputs
+
+# Microsoft Foundry
+- uses: anthropics/claude-code-action@v1
+  with:
+    use_foundry: "true"
+    claude_args: |
+      --model claude-sonnet-4-5
+    # ... other inputs
+  env:
+    ANTHROPIC_FOUNDRY_BASE_URL: https://my-resource.services.ai.azure.com
 ```
+
+See [Cloud Providers](./cloud-providers.md) for the authentication steps each provider needs.
 
 ### 1M context models through an API gateway
 

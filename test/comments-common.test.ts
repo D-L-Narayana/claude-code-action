@@ -4,6 +4,8 @@ import {
   createJobRunLink,
   createBranchLink,
   createCommentBody,
+  hasUnclosedCodeFence,
+  openCodeFence,
 } from "../src/github/operations/comments/common";
 import { GITHUB_SERVER_URL } from "../src/github/api/config";
 
@@ -75,6 +77,57 @@ describe("comments/common", () => {
       expect(body.indexOf(branchLink)).toBeGreaterThan(
         body.indexOf(jobRunLink),
       );
+    });
+  });
+
+  describe("hasUnclosedCodeFence", () => {
+    test("is false for text without fences", () => {
+      expect(hasUnclosedCodeFence("")).toBe(false);
+      expect(hasUnclosedCodeFence("plain\ntext")).toBe(false);
+    });
+
+    test("is true when a backtick fence is opened but never closed", () => {
+      expect(hasUnclosedCodeFence('intro\n```json\n{"a": 1}')).toBe(true);
+    });
+
+    test("is false once the fence is closed again", () => {
+      expect(hasUnclosedCodeFence("```\ncode\n```\nafter")).toBe(false);
+    });
+
+    test("treats an indented fence with an info string as an opener", () => {
+      expect(hasUnclosedCodeFence("  ```python\nprint(1)")).toBe(true);
+    });
+
+    test("only closes a fence with the same fence character", () => {
+      // A backtick line inside a tilde block is content, not a closer.
+      expect(hasUnclosedCodeFence("~~~\n```\nstill inside")).toBe(true);
+      expect(hasUnclosedCodeFence("~~~\n```\n~~~\noutside")).toBe(false);
+    });
+
+    test("ignores inline code spans", () => {
+      expect(hasUnclosedCodeFence("use `foo()` and ``bar`` here")).toBe(false);
+    });
+
+    test("does not open a backtick fence whose info string contains a backtick", () => {
+      // CommonMark: such a line is not a fence opener.
+      expect(hasUnclosedCodeFence("```js `inline`\ntext")).toBe(false);
+    });
+  });
+
+  describe("openCodeFence", () => {
+    test("returns the exact opener so a closer of matching length can be built", () => {
+      expect(openCodeFence("````md\n```\nnested example")).toBe("````");
+      expect(openCodeFence("~~~\ncode")).toBe("~~~");
+    });
+
+    test("requires the closer to be at least as long as the opener", () => {
+      expect(openCodeFence("````\n```\nstill open")).toBe("````");
+      expect(openCodeFence("````\n`````\nclosed")).toBeNull();
+    });
+
+    test("returns null when nothing is open", () => {
+      expect(openCodeFence("```\nclosed\n```")).toBeNull();
+      expect(openCodeFence("no fences here")).toBeNull();
     });
   });
 });

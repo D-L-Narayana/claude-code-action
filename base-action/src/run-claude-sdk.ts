@@ -17,8 +17,41 @@ export type ClaudeRunResult = {
   structuredOutput?: string;
 };
 
+/**
+ * Error thrown when a Claude run ends without a usable result. It carries the
+ * session id and execution file (when known) so callers can still expose them
+ * as outputs after a failure instead of losing them with the thrown error.
+ */
+export class ClaudeExecutionError extends Error {
+  readonly sessionId?: string;
+  readonly executionFile?: string;
+
+  constructor(
+    message: string,
+    details: { sessionId?: string; executionFile?: string },
+  ) {
+    super(message);
+    this.name = "ClaudeExecutionError";
+    this.sessionId = details.sessionId;
+    this.executionFile = details.executionFile;
+  }
+}
+
 /** Filename for the user request file, written by prompt generation */
 const USER_REQUEST_FILENAME = "claude-user-request.txt";
+
+/**
+ * Extract the session id from the system.init message, if one was received.
+ */
+function extractSessionId(messages: SDKMessage[]): string | undefined {
+  const initMessage = messages.find(
+    (m) => m.type === "system" && "subtype" in m && m.subtype === "init",
+  );
+  if (initMessage && "session_id" in initMessage && initMessage.session_id) {
+    return initMessage.session_id as string;
+  }
+  return undefined;
+}
 
 /**
  * Check if a file exists
@@ -211,8 +244,13 @@ export async function runClaudeWithSdk(
     }
   } catch (error) {
     console.error("SDK execution error:", error);
-    await writeExecutionFile(messages);
-    throw new Error(`SDK execution error: ${error}`);
+    // Whatever was learned before the failure (execution log, session id)
+    // travels with the error so callers can still surface it as outputs.
+    const executionFile = await writeExecutionFile(messages);
+    throw new ClaudeExecutionError(`SDK execution error: ${error}`, {
+      sessionId: extractSessionId(messages),
+      executionFile,
+    });
   }
 
   const result: ClaudeRunResult = {
@@ -225,17 +263,25 @@ export async function runClaudeWithSdk(
   }
 
   // Extract session_id from system.init message
-  const initMessage = messages.find(
-    (m) => m.type === "system" && "subtype" in m && m.subtype === "init",
-  );
-  if (initMessage && "session_id" in initMessage && initMessage.session_id) {
-    result.sessionId = initMessage.session_id as string;
+  const sessionId = extractSessionId(messages);
+  if (sessionId) {
+    result.sessionId = sessionId;
     core.info(`Set session_id: ${result.sessionId}`);
   }
 
+  // Attached to every failure thrown below so the session can still be
+  // resumed / the log located even though no ClaudeRunResult is returned
+  const failureDetails = {
+    sessionId: result.sessionId,
+    executionFile: result.executionFile,
+  };
+
   if (!resultMessage) {
     core.error("No result message received from Claude");
-    throw new Error("No result message received from Claude");
+    throw new ClaudeExecutionError(
+      "No result message received from Claude",
+      failureDetails,
+    );
   }
 
   if (
@@ -246,7 +292,7 @@ export async function runClaudeWithSdk(
   ) {
     const message = `Claude reported a successful result after ${resultMessage.num_turns} turns, exceeding the configured maximum of ${sdkOptions.maxTurns}`;
     core.error(message);
-    throw new Error(message);
+    throw new ClaudeExecutionError(message, failureDetails);
   }
 
   // subtype "success" with is_error:true means the run errored without producing
@@ -271,8 +317,9 @@ export async function runClaudeWithSdk(
         `--json-schema was provided but Claude did not return structured_output. Result subtype: ${resultMessage.subtype}`,
       );
       result.conclusion = "failure";
-      throw new Error(
+      throw new ClaudeExecutionError(
         `--json-schema was provided but Claude did not return structured_output. Result subtype: ${resultMessage.subtype}`,
+        failureDetails,
       );
     }
   }
@@ -286,7 +333,7 @@ export async function runClaudeWithSdk(
     if ("errors" in resultMessage && resultMessage.errors) {
       core.error(`Execution failed: ${resultMessage.errors.join(", ")}`);
     }
-    throw new Error(
+    throw new ClaudeExecutionError(
       `Claude execution failed: ${
         resultMessage.subtype === "success" && resultMessage.is_error
           ? "result is_error:true"
@@ -294,6 +341,7 @@ export async function runClaudeWithSdk(
             ? resultMessage.errors.join(", ")
             : "unknown error"
       }`,
+      failureDetails,
     );
   }
 

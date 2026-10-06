@@ -60,6 +60,7 @@ Each solution includes complete working examples, configuration details, and exp
 - [Cloud Providers](./docs/cloud-providers.md) - AWS Bedrock, Google Vertex AI, and Microsoft Foundry setup
 - [Capabilities & Limitations](./docs/capabilities-and-limitations.md) - What Claude can and cannot do
 - [Security](./docs/security.md) - Access control, permissions, and commit signing
+- [Limits and Safeguards](./docs/limits.md) - Size limits, truncation markers, pagination caps, timeouts, and failure handling
 - [FAQ](./docs/faq.md) - Common questions and troubleshooting
 
 ## 📚 FAQ

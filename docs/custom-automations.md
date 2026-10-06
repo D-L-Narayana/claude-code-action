@@ -15,14 +15,17 @@ The action automatically detects which mode to use based on your configuration:
 
 This action supports the following GitHub events ([learn more GitHub event triggers](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows)):
 
-- `pull_request` or `pull_request_target` - When PRs are opened or synchronized
+- `pull_request` or `pull_request_target` - When PRs are opened, synchronized, reopened, or marked ready for review (read [Security](./security.md#using-this-action-with-pull_request_target-or-workflow_run) before using `pull_request_target`)
 - `issue_comment` - When comments are created on issues or PRs
-- `pull_request_comment` - When comments are made on PR diffs
-- `issues` - When issues are opened or assigned
+- `issues` - When issues are opened, edited, labeled, or assigned
 - `pull_request_review` - When PR reviews are submitted
-- `pull_request_review_comment` - When comments are made on PR reviews
+- `pull_request_review_comment` - When comments are made on PR diffs
+- `workflow_dispatch` - Manual workflow triggers
 - `repository_dispatch` - Custom events triggered via API
-- `workflow_dispatch` - Manual workflow triggers (coming soon)
+- `schedule` - Cron-scheduled runs
+- `workflow_run` - When another workflow completes, for example to react to a CI failure (the action additionally checks the actor that started the upstream run — see [Security](./security.md#using-this-action-with-pull_request_target-or-workflow_run))
+
+`workflow_dispatch`, `repository_dispatch`, `schedule` and `workflow_run` have no issue or PR context, so they require a `prompt` and always run in agent mode.
 
 ## Automated Documentation Updates
 

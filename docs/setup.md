@@ -54,7 +54,7 @@ Notes:
 - The workflow must grant `id-token: write` permission so the action can fetch a GitHub OIDC token. The default GitHub App authentication path already requires this permission.
 - Do not set `anthropic_api_key` or `claude_code_oauth_token` alongside the federation inputs — a static credential takes precedence and federation will not be used.
 - The GitHub OIDC token is requested with audience `https://api.anthropic.com` by default, so set the federation rule's expected audience to that value (or leave the rule's audience unmatched). Use `anthropic_oidc_audience` only if your rule expects a different audience.
-- Inline comment classification (`classify_inline_comments`) currently requires `anthropic_api_key`; with federation it is skipped and unconfirmed inline comments are posted directly.
+- Inline comment classification (`classify_inline_comments`) currently requires `anthropic_api_key`; with federation it is skipped and unconfirmed inline comments are posted directly. When classification runs, it uses `claude-haiku-4-5` by default; set `CLAUDE_INLINE_CLASSIFIER_MODEL` in your workflow's job-level `env:` block to use a different model (see [Workflow-Level Environment Variables](./configuration.md#workflow-level-environment-variables)).
 
 ## Using a Custom GitHub App
 
@@ -64,7 +64,7 @@ If you prefer not to install the official Claude app, you can create your own Gi
 
 - You need more restrictive permissions than the official app
 - Organization policies prevent installing third-party apps
-- You're using AWS Bedrock or Google Vertex AI
+- You're using AWS Bedrock, Google Vertex AI, or Microsoft Foundry
 
 ### Option 1: Quick Setup with App Manifest (Recommended)
 

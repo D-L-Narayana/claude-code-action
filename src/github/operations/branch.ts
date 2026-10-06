@@ -13,6 +13,7 @@ import type { GitHubPullRequest } from "../types";
 import type { Octokits } from "../api/client";
 import type { FetchDataResult } from "../data/fetcher";
 import { generateBranchName } from "../../utils/branch-template";
+import { PrepareError, isPrepareError } from "../../utils/prepare-error";
 import { fetchDepthArgs } from "./fetch-depth";
 
 /**
@@ -346,7 +347,16 @@ export async function setupBranch(
       currentBranch: newBranch,
     };
   } catch (error) {
-    console.error("Error in branch setup:", error);
-    process.exit(1);
+    if (isPrepareError(error)) {
+      throw error;
+    }
+    // Throw instead of exiting so run.ts reaches its finally block and can
+    // update the tracking comment and set outputs. The original message is
+    // kept because it is what users see (e.g. 'Invalid branch name: "..."').
+    throw new PrepareError(
+      "branch",
+      error instanceof Error ? error.message : String(error),
+      { cause: error },
+    );
   }
 }

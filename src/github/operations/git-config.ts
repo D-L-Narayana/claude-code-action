@@ -12,9 +12,14 @@ import { homedir } from "os";
 import type { GitHubContext } from "../context";
 import { GITHUB_SERVER_URL } from "../api/config";
 
-const SSH_SIGNING_KEY_PATH = join(homedir(), ".ssh", "claude_signing_key");
+// The key lives under the runner's home directory, outside the checkout, so
+// it can never be committed. The home directory is a parameter (defaulting to
+// the real one) so tests can exercise the real code against a throw-away home.
+function sshSigningKeyPath(homeDir: string): string {
+  return join(homeDir, ".ssh", "claude_signing_key");
+}
 
-type GitUser = {
+export type GitUser = {
   login: string;
   id: number;
 };
@@ -139,7 +144,10 @@ export async function replaceCheckoutCredentials(
  * Configure git to use SSH signing for commits
  * This is an alternative to GitHub API-based commit signing (use_commit_signing)
  */
-export async function setupSshSigning(sshSigningKey: string): Promise<void> {
+export async function setupSshSigning(
+  sshSigningKey: string,
+  homeDir: string = homedir(),
+): Promise<void> {
   console.log("Configuring SSH signing for commits...");
 
   // Validate SSH key format
@@ -154,7 +162,7 @@ export async function setupSshSigning(sshSigningKey: string): Promise<void> {
   }
 
   // Create .ssh directory with secure permissions (700)
-  const sshDir = join(homedir(), ".ssh");
+  const sshDir = join(homeDir, ".ssh");
   await mkdir(sshDir, { recursive: true, mode: 0o700 });
 
   // Ensure key ends with newline (required for ssh-keygen to parse it)
@@ -163,12 +171,13 @@ export async function setupSshSigning(sshSigningKey: string): Promise<void> {
     : sshSigningKey + "\n";
 
   // Write the signing key atomically with secure permissions (600)
-  await writeFile(SSH_SIGNING_KEY_PATH, normalizedKey, { mode: 0o600 });
-  console.log(`✓ SSH signing key written to ${SSH_SIGNING_KEY_PATH}`);
+  const keyPath = sshSigningKeyPath(homeDir);
+  await writeFile(keyPath, normalizedKey, { mode: 0o600 });
+  console.log(`✓ SSH signing key written to ${keyPath}`);
 
   // Configure git to use SSH signing
   await $`git config gpg.format ssh`;
-  await $`git config user.signingkey ${SSH_SIGNING_KEY_PATH}`;
+  await $`git config user.signingkey ${keyPath}`;
   await $`git config commit.gpgsign true`;
 
   console.log("✓ Git configured to use SSH signing for commits");
@@ -178,9 +187,11 @@ export async function setupSshSigning(sshSigningKey: string): Promise<void> {
  * Clean up the SSH signing key file
  * Should be called in the post step for security
  */
-export async function cleanupSshSigning(): Promise<void> {
+export async function cleanupSshSigning(
+  homeDir: string = homedir(),
+): Promise<void> {
   try {
-    await rm(SSH_SIGNING_KEY_PATH, { force: true });
+    await rm(sshSigningKeyPath(homeDir), { force: true });
     console.log("✓ SSH signing key cleaned up");
   } catch (error) {
     console.log("No SSH signing key to clean up");

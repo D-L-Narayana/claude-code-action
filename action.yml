@@ -287,7 +287,6 @@ runs:
           run ${GITHUB_ACTION_PATH}/src/entrypoints/run.ts
       env:
         # Prepare inputs
-        MODE: ${{ inputs.mode }}
         PROMPT: ${{ inputs.prompt }}
         TRIGGER_PHRASE: ${{ inputs.trigger_phrase }}
         ASSIGNEE_TRIGGER: ${{ inputs.assignee_trigger }}
@@ -315,6 +314,11 @@ runs:
         ADDITIONAL_PERMISSIONS: ${{ inputs.additional_permissions }}
         CLAUDE_ARGS: ${{ inputs.claude_args }}
         ALL_INPUTS: ${{ toJson(inputs) }}
+        # Prompt construction tuning — read from the calling workflow's env (see
+        # the MCP configuration note below for why job-level env must be
+        # forwarded explicitly). See docs/limits.md.
+        CLAUDE_PROMPT_MAX_CHARS: ${{ env.CLAUDE_PROMPT_MAX_CHARS }}
+        USE_SIMPLE_PROMPT: ${{ env.USE_SIMPLE_PROMPT }}
 
         # Base-action inputs
         INPUT_PROMPT_FILE: ${{ runner.temp }}/claude-prompts/claude-prompt.txt
@@ -437,6 +441,9 @@ runs:
         REPO_NAME: ${{ github.event.repository.name }}
         PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        # Optional override for the model that classifies buffered inline
+        # comments as real review vs. test/probe. See docs/limits.md.
+        CLAUDE_INLINE_CLASSIFIER_MODEL: ${{ env.CLAUDE_INLINE_CLASSIFIER_MODEL }}
       run: |
         BUN_BIN="${GITHUB_ACTION_PATH}/bin/bun"
         [ -x "$BUN_BIN" ] || BUN_BIN="bun"

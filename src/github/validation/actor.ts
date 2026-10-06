@@ -7,25 +7,7 @@
 
 import type { Octokit } from "@octokit/rest";
 import type { GitHubContext } from "../context";
-
-function isAllowedBot(actor: string, allowedBots: string): boolean {
-  const trimmed = allowedBots.trim();
-  if (trimmed === "*") return true;
-  if (!trimmed) return false;
-
-  const allowedList = trimmed
-    .split(",")
-    .map((bot) =>
-      bot
-        .trim()
-        .toLowerCase()
-        .replace(/\[bot\]$/, ""),
-    )
-    .filter((bot) => bot.length > 0);
-
-  const normalizedActor = actor.toLowerCase().replace(/\[bot\]$/, "");
-  return allowedList.includes(normalizedActor);
-}
+import { isAllowedBot, normalizeLogin } from "./allowed-bots";
 
 export async function checkHumanActor(
   octokit: Octokit,
@@ -57,7 +39,7 @@ export async function checkHumanActor(
         );
         return;
       }
-      const botName = actor.toLowerCase().replace(/\[bot\]$/, "");
+      const botName = normalizeLogin(actor);
       throw new Error(
         `Workflow initiated by non-human actor: ${botName} (actor not found on GitHub). Add bot to allowed_bots list or use '*' to allow all bots.`,
       );
@@ -75,7 +57,7 @@ export async function checkHumanActor(
       );
       return;
     }
-    const botName = actor.toLowerCase().replace(/\[bot\]$/, "");
+    const botName = normalizeLogin(actor);
     throw new Error(
       `Workflow initiated by non-human actor: ${botName} (type: ${actorType}). Add bot to allowed_bots list or use '*' to allow all bots.`,
     );

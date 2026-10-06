@@ -1,11 +1,32 @@
 export function stripInvisibleCharacters(content: string): string {
+  // Zero-width space / non-joiner / joiner and the BOM: invisible separators
+  // that split a word so it slips past keyword matching, or hide text.
   content = content.replace(/[\u200B\u200C\u200D\uFEFF]/g, "");
+  // C0/C1 control characters (keeping \t, \n and \r): never legitimate in
+  // prose, and confuse terminals and parsers.
   content = content.replace(
     /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g,
     "",
   );
+  // Soft hyphen: invisible unless a line happens to break there.
   content = content.replace(/\u00AD/g, "");
+  // Bidi overrides and isolates: reorder the rendered text so what a reviewer
+  // sees differs from the code points the model reads (Trojan Source).
   content = content.replace(/[\u202A-\u202E\u2066-\u2069]/g, "");
+  // Word joiner, Mongolian vowel separator and combining grapheme joiner:
+  // zero-width format/combining characters outside the ranges above that
+  // serve the same word-splitting and hiding purpose.
+  content = content.replace(/[\u2060\u180E\u034F]/g, "");
+  // Variation selectors VS1-VS16: invisible on their own, and a run of them
+  // after one visible base character can encode arbitrary hidden data. Emoji
+  // keep their base code point and lose only the presentation selector
+  // (e.g. U+FE0F), which does not change what they mean.
+  content = content.replace(/[\uFE00-\uFE0F]/g, "");
+  // Unicode TAG block (U+E0000-U+E007F): a complete invisible copy of ASCII
+  // ("ASCII smuggling"). A model that reads raw code points can decode a
+  // whole hidden instruction while a human reviewer sees nothing. These are
+  // astral code points, hence the `u` flag.
+  content = content.replace(/[\u{E0000}-\u{E007F}]/gu, "");
   return content;
 }
 
@@ -77,8 +98,9 @@ export function sanitizeContent(content: string): string {
 }
 
 /**
- * Redact well-known credential formats (GitHub, Anthropic, AWS, Slack, JWTs)
- * from arbitrary text. Callers don't need to know which vendor a value belongs to.
+ * Redact well-known credential formats (GitHub, Anthropic, Google, GitLab,
+ * npm, AWS, Slack, JWTs, URL-embedded credentials) from arbitrary text.
+ * Callers don't need to know which vendor a value belongs to.
  *
  * Vendor-prefixed formats are matched without a leading word boundary: the
  * prefix already anchors them, and runtime output frequently puts a word
@@ -87,6 +109,15 @@ export function sanitizeContent(content: string): string {
  */
 export function redactSecrets(content: string): string {
   content = redactGitHubTokens(content);
+
+  // Anthropic OAuth tokens: sk-ant-oat01-... This has to run before the
+  // generic sk-ant- rule below, which would otherwise consume these under the
+  // API-key label; the distinct label tells an operator which credential
+  // actually leaked.
+  content = content.replace(
+    /sk-ant-oat01-[A-Za-z0-9_-]{20,}/g,
+    "[REDACTED_ANTHROPIC_OAUTH_TOKEN]",
+  );
 
   // Anthropic API keys: sk-ant-...
   content = content.replace(
@@ -102,6 +133,18 @@ export function redactSecrets(content: string): string {
     "[REDACTED_AWS_KEY_ID]",
   );
 
+  // Google API keys: AIza followed by 35 URL-safe base64 characters.
+  content = content.replace(/AIza[0-9A-Za-z_-]{35}/g, "[REDACTED_GOOGLE_KEY]");
+
+  // GitLab personal access tokens: glpat-...
+  content = content.replace(
+    /glpat-[0-9A-Za-z_-]{20,}/g,
+    "[REDACTED_GITLAB_TOKEN]",
+  );
+
+  // npm access tokens: npm_ followed by 36 alphanumerics.
+  content = content.replace(/npm_[A-Za-z0-9]{36}/g, "[REDACTED_NPM_TOKEN]");
+
   // Slack tokens: xoxb-, xoxp-, xoxa-, xoxs-, xoxr-
   content = content.replace(
     /xox[abpsr]-[A-Za-z0-9-]{10,}/g,
@@ -113,6 +156,17 @@ export function redactSecrets(content: string): string {
   content = content.replace(
     /eyJ[A-Za-z0-9_-]{10,2000}\.eyJ[A-Za-z0-9_-]{10,4000}\.[A-Za-z0-9_-]{10,2000}\b/g,
     "[REDACTED_JWT]",
+  );
+
+  // Credentials embedded in URLs (https://user:password@host). git prints
+  // the remote URL verbatim in its error output, e.g.
+  //   fatal: unable to access 'https://x-access-token:ghs_...@github.com/o/r.git/'
+  // and that output ends up in comments. The whole userinfo is replaced, not
+  // just the password: the user name may itself be a secret. A ":" that is
+  // not followed by "@" (a port, "http://host:8080/path") does not match.
+  content = content.replace(
+    /(https?:\/\/)[^\s/:@]+:[^\s/@]+@/g,
+    "$1[REDACTED_URL_CREDENTIAL]@",
   );
 
   return content;

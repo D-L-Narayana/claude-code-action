@@ -2,7 +2,65 @@
 
 import { readFileSync, existsSync } from "fs";
 import { exit } from "process";
+import { GITHUB_STEP_SUMMARY_MAX_BYTES } from "../github/constants";
+import { openCodeFence } from "../github/operations/comments/common";
 import { redactSecrets } from "../github/utils/sanitizer";
+
+function truncationNote(omittedBytes: number): string {
+  return `\n\n---\n*Report truncated: ${omittedBytes} bytes omitted to stay within the GitHub step summary limit.*\n`;
+}
+
+/** Largest index <= `byteIndex` that starts a UTF-8 sequence in `bytes`. */
+function alignToUtf8Boundary(bytes: Buffer, byteIndex: number): number {
+  let index = byteIndex;
+  // Continuation bytes are 10xxxxxx; stepping over them lands on a lead byte.
+  while (
+    index > 0 &&
+    index < bytes.length &&
+    ((bytes[index] ?? 0) & 0xc0) === 0x80
+  ) {
+    index--;
+  }
+  return index;
+}
+
+/**
+ * Cap a rendered report at the GitHub Actions step summary size limit. The
+ * runner enforces that limit in bytes and rejects an oversized summary
+ * outright, so without the cap the whole report is lost rather than its tail.
+ * The cut lands on a character boundary, closes a code block it may have
+ * opened and ends with a note saying how many bytes were left out.
+ */
+export function truncateForStepSummary(
+  markdown: string,
+  maxBytes: number = GITHUB_STEP_SUMMARY_MAX_BYTES,
+): string {
+  const bytes = Buffer.from(markdown, "utf8");
+  if (bytes.length <= maxBytes) {
+    return markdown;
+  }
+
+  // Reserve room for the longest note that could be emitted so the exact
+  // count can be filled in after the cut without pushing past the limit.
+  const reserved = Buffer.byteLength(truncationNote(bytes.length), "utf8");
+  let cut = alignToUtf8Boundary(bytes, Math.max(0, maxBytes - reserved));
+  let kept = "";
+  let closer = "";
+  for (;;) {
+    kept = bytes.subarray(0, cut).toString("utf8");
+    const fence = openCodeFence(kept);
+    closer = fence ? `\n${fence}` : "";
+    const closerBytes = Buffer.byteLength(closer, "utf8");
+    if (cut === 0 || cut + closerBytes + reserved <= maxBytes) {
+      break;
+    }
+    // The closer needs room of its own; move the cut back and re-check, since
+    // the block it closes may itself have started inside the removed span.
+    cut = alignToUtf8Boundary(bytes, Math.max(0, cut - closerBytes));
+  }
+
+  return `${kept}${closer}${truncationNote(bytes.length - cut)}`;
+}
 
 export type ToolUse = {
   type: string;
@@ -434,7 +492,8 @@ export function formatTurnsFromData(data: Turn[]): string {
 
   // Runtime output may contain credentials that are not registered as
   // workflow secrets, so redact known formats before this gets published.
-  return redactSecrets(markdown);
+  // Capping comes last so the size check sees the bytes that are written.
+  return truncateForStepSummary(redactSecrets(markdown));
 }
 
 function main(): void {

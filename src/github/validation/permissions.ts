@@ -1,28 +1,7 @@
 import * as core from "@actions/core";
 import { isWorkflowRunEvent, type GitHubContext } from "../context";
 import type { Octokit } from "@octokit/rest";
-
-/**
- * Check if a bot actor is in the allowed bots list.
- */
-function isAllowedBot(actor: string, allowedBots: string): boolean {
-  const trimmed = allowedBots.trim();
-  if (trimmed === "*") return true;
-  if (!trimmed) return false;
-
-  const allowedList = trimmed
-    .split(",")
-    .map((bot) =>
-      bot
-        .trim()
-        .toLowerCase()
-        .replace(/\[bot\]$/, ""),
-    )
-    .filter((bot) => bot.length > 0);
-
-  const normalizedActor = actor.toLowerCase().replace(/\[bot\]$/, "");
-  return allowedList.includes(normalizedActor);
-}
+import { isAllowedBot } from "./allowed-bots";
 
 /**
  * Collect the actors whose repository access should be checked. This is
@@ -95,11 +74,17 @@ async function checkActorWritePermissions(
         );
         return true;
       } else if (allowedUsers) {
+        // GitHub logins are case-insensitive ("Alice" and "alice" are the
+        // same account), so the comparison is case-folded. Entries are
+        // deliberately not run through normalizeLogin: that would also strip
+        // a "[bot]" suffix, and an entry like "renovate[bot]" — which can
+        // never name a user account — would then newly match whoever
+        // registers the login "renovate", widening this already-risky bypass.
         const allowedUserList = allowedUsers
           .split(",")
-          .map((u) => u.trim())
+          .map((u) => u.trim().toLowerCase())
           .filter((u) => u.length > 0);
-        if (allowedUserList.includes(actor)) {
+        if (allowedUserList.includes(actor.toLowerCase())) {
           core.warning(
             `⚠️ SECURITY WARNING: Bypassing write permission check for ${actor} due to allowed_non_write_users configuration. This should only be used for workflows with very limited permissions.`,
           );

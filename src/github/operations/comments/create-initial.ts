@@ -5,16 +5,15 @@
  * This comment shows the working status and includes a link to the job run
  */
 
-import { appendFileSync } from "fs";
+import * as core from "@actions/core";
 import { createJobRunLink, createCommentBody } from "./common";
 import {
   isPullRequestReviewCommentEvent,
   isPullRequestEvent,
   type ParsedGitHubContext,
 } from "../../context";
+import { CLAUDE_GITHUB_APP_USER_ID } from "../../constants";
 import type { Octokit } from "@octokit/rest";
-
-const CLAUDE_APP_BOT_ID = 209825114;
 
 export async function createInitialComment(
   octokit: Octokit,
@@ -39,7 +38,7 @@ export async function createInitialComment(
         issue_number: context.entityNumber,
       });
       const existingComment = comments.data.find((comment) => {
-        const idMatch = comment.user?.id === CLAUDE_APP_BOT_ID;
+        const idMatch = comment.user?.id === CLAUDE_GITHUB_APP_USER_ID;
         const botNameMatch =
           comment.user?.type === "Bot" &&
           comment.user?.login.toLowerCase().includes("claude");
@@ -82,9 +81,11 @@ export async function createInitialComment(
       });
     }
 
-    // Output the comment ID for downstream steps using GITHUB_OUTPUT
-    const githubOutput = process.env.GITHUB_OUTPUT!;
-    appendFileSync(githubOutput, `claude_comment_id=${response.data.id}\n`);
+    // Publish the comment ID for downstream steps. core.setOutput writes to
+    // GITHUB_OUTPUT when the runner provides it and falls back to the stdout
+    // command otherwise, so an unset variable (local runs, tests) cannot
+    // crash the action after the comment was already posted.
+    core.setOutput("claude_comment_id", String(response.data.id));
     console.log(`✅ Created initial comment with ID: ${response.data.id}`);
     return response.data;
   } catch (error) {
@@ -99,8 +100,7 @@ export async function createInitialComment(
         body: initialBody,
       });
 
-      const githubOutput = process.env.GITHUB_OUTPUT!;
-      appendFileSync(githubOutput, `claude_comment_id=${response.data.id}\n`);
+      core.setOutput("claude_comment_id", String(response.data.id));
       console.log(`✅ Created fallback comment with ID: ${response.data.id}`);
       return response.data;
     } catch (fallbackError) {

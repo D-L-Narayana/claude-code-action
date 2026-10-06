@@ -44,20 +44,31 @@ describe("runClaudeWithSdk", () => {
     }));
 
     try {
-      const { runClaudeWithSdk } = await import("../src/run-claude-sdk");
+      const { runClaudeWithSdk, ClaudeExecutionError } = await import(
+        "../src/run-claude-sdk"
+      );
 
-      await expect(
-        runClaudeWithSdk(promptPath, {
-          sdkOptions: {},
-          showFullOutput: false,
-          hasJsonSchema: false,
-        }),
-      ).rejects.toThrow("SDK execution error");
+      const execution = runClaudeWithSdk(promptPath, {
+        sdkOptions: {},
+        showFullOutput: false,
+        hasJsonSchema: false,
+      });
+
+      await expect(execution).rejects.toThrow("SDK execution error");
 
       const executionFile = join(tempDir, "claude-execution-output.json");
       await expect(readFile(executionFile, "utf-8")).resolves.toBe(
         JSON.stringify([initMessage], null, 2),
       );
+
+      // The session id and execution file must survive the failure so callers
+      // can still expose them as outputs
+      const error = await execution.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ClaudeExecutionError);
+      expect(error).toMatchObject({
+        sessionId: "session-123",
+        executionFile,
+      });
     } finally {
       consoleErrorSpy.mockRestore();
       consoleLogSpy.mockRestore();
@@ -194,15 +205,17 @@ describe("runClaudeWithSdk", () => {
     }));
 
     try {
-      const { runClaudeWithSdk } = await import("../src/run-claude-sdk");
+      const { runClaudeWithSdk, ClaudeExecutionError } = await import(
+        "../src/run-claude-sdk"
+      );
 
-      await expect(
-        runClaudeWithSdk(promptPath, {
-          sdkOptions: {},
-          showFullOutput: false,
-          hasJsonSchema: false,
-        }),
-      ).rejects.toThrow("result is_error:true");
+      const execution = runClaudeWithSdk(promptPath, {
+        sdkOptions: {},
+        showFullOutput: false,
+        hasJsonSchema: false,
+      });
+
+      await expect(execution).rejects.toThrow("result is_error:true");
 
       const executionFile = join(tempDir, "claude-execution-output.json");
       await expect(readFile(executionFile, "utf-8")).resolves.toBe(
@@ -211,6 +224,15 @@ describe("runClaudeWithSdk", () => {
       expect(coreErrorSpy).toHaveBeenCalledWith(
         "Claude result reported subtype success with is_error:true (run did not complete successfully)",
       );
+
+      // The session id and execution file must survive the failure so callers
+      // can still expose them as outputs
+      const error = await execution.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ClaudeExecutionError);
+      expect(error).toMatchObject({
+        sessionId: "session-123",
+        executionFile,
+      });
     } finally {
       consoleErrorSpy.mockRestore();
       consoleLogSpy.mockRestore();
@@ -259,15 +281,17 @@ describe("runClaudeWithSdk", () => {
     }));
 
     try {
-      const { runClaudeWithSdk } = await import("../src/run-claude-sdk");
+      const { runClaudeWithSdk, ClaudeExecutionError } = await import(
+        "../src/run-claude-sdk"
+      );
 
-      await expect(
-        runClaudeWithSdk(promptPath, {
-          sdkOptions: { maxTurns: 60 },
-          showFullOutput: false,
-          hasJsonSchema: false,
-        }),
-      ).rejects.toThrow(
+      const execution = runClaudeWithSdk(promptPath, {
+        sdkOptions: { maxTurns: 60 },
+        showFullOutput: false,
+        hasJsonSchema: false,
+      });
+
+      await expect(execution).rejects.toThrow(
         "Claude reported a successful result after 73 turns, exceeding the configured maximum of 60",
       );
 
@@ -278,10 +302,142 @@ describe("runClaudeWithSdk", () => {
       expect(coreErrorSpy).toHaveBeenCalledWith(
         "Claude reported a successful result after 73 turns, exceeding the configured maximum of 60",
       );
+
+      // The session id and execution file must survive the failure so callers
+      // can still expose them as outputs
+      const error = await execution.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ClaudeExecutionError);
+      expect(error).toMatchObject({
+        sessionId: "session-123",
+        executionFile,
+      });
     } finally {
       consoleErrorSpy.mockRestore();
       consoleLogSpy.mockRestore();
       coreErrorSpy.mockRestore();
+    }
+  });
+
+  test("throws a ClaudeExecutionError carrying session details when no result message is received", async () => {
+    const consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
+    const coreErrorSpy = spyOn(
+      await import("@actions/core"),
+      "error",
+    ).mockImplementation(() => {});
+
+    tempDir = await mkdtemp(join(tmpdir(), "claude-sdk-"));
+    process.env.RUNNER_TEMP = tempDir;
+
+    const promptPath = join(tempDir, "prompt.txt");
+    await writeFile(promptPath, "test prompt");
+
+    const initMessage = {
+      type: "system",
+      subtype: "init",
+      session_id: "session-123",
+      model: "claude-sonnet-4-6",
+    };
+
+    mock.module("@anthropic-ai/claude-agent-sdk", () => ({
+      // The iterator ends without ever yielding a result message
+      query: async function* () {
+        yield initMessage;
+      },
+    }));
+
+    try {
+      const { runClaudeWithSdk, ClaudeExecutionError } = await import(
+        "../src/run-claude-sdk"
+      );
+
+      const execution = runClaudeWithSdk(promptPath, {
+        sdkOptions: {},
+        showFullOutput: false,
+        hasJsonSchema: false,
+      });
+
+      await expect(execution).rejects.toThrow(
+        "No result message received from Claude",
+      );
+      expect(coreErrorSpy).toHaveBeenCalledWith(
+        "No result message received from Claude",
+      );
+
+      const error = await execution.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ClaudeExecutionError);
+      expect(error).toMatchObject({
+        sessionId: "session-123",
+        executionFile: join(tempDir, "claude-execution-output.json"),
+      });
+    } finally {
+      consoleLogSpy.mockRestore();
+      coreErrorSpy.mockRestore();
+    }
+  });
+
+  test("throws a ClaudeExecutionError carrying session details when --json-schema output is missing", async () => {
+    const consoleLogSpy = spyOn(console, "log").mockImplementation(() => {});
+    const coreSetFailedSpy = spyOn(
+      await import("@actions/core"),
+      "setFailed",
+    ).mockImplementation(() => {});
+
+    tempDir = await mkdtemp(join(tmpdir(), "claude-sdk-"));
+    process.env.RUNNER_TEMP = tempDir;
+
+    const promptPath = join(tempDir, "prompt.txt");
+    await writeFile(promptPath, "test prompt");
+
+    const initMessage = {
+      type: "system",
+      subtype: "init",
+      session_id: "session-123",
+      model: "claude-sonnet-4-6",
+    };
+
+    // A successful result that lacks the structured_output requested via --json-schema
+    const resultWithoutStructuredOutput = {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 434,
+      num_turns: 1,
+      total_cost_usd: 0,
+      permission_denials: [],
+    };
+
+    mock.module("@anthropic-ai/claude-agent-sdk", () => ({
+      query: async function* () {
+        yield initMessage;
+        yield resultWithoutStructuredOutput;
+      },
+    }));
+
+    try {
+      const { runClaudeWithSdk, ClaudeExecutionError } = await import(
+        "../src/run-claude-sdk"
+      );
+
+      const execution = runClaudeWithSdk(promptPath, {
+        sdkOptions: {},
+        showFullOutput: false,
+        hasJsonSchema: true,
+      });
+
+      const expectedMessage =
+        "--json-schema was provided but Claude did not return structured_output. Result subtype: success";
+      await expect(execution).rejects.toThrow(expectedMessage);
+      expect(coreSetFailedSpy).toHaveBeenCalledWith(expectedMessage);
+
+      const error = await execution.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ClaudeExecutionError);
+      expect(error).toMatchObject({
+        sessionId: "session-123",
+        executionFile: join(tempDir, "claude-execution-output.json"),
+      });
+    } finally {
+      consoleLogSpy.mockRestore();
+      coreSetFailedSpy.mockRestore();
     }
   });
 });

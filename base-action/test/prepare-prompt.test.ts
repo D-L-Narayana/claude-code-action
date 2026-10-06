@@ -2,26 +2,42 @@
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { preparePrompt, type PreparePromptInput } from "../src/prepare-prompt";
-import { unlink, writeFile, readFile, stat } from "fs/promises";
+import { mkdtemp, rm, unlink, writeFile, readFile, stat } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+
+// Only used when RUNNER_TEMP is unset (e.g. when running outside GitHub Actions)
+const FALLBACK_PROMPT_PATH = "/tmp/claude-action/prompt.txt";
+
+async function removeIfPresent(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch {
+    // Ignore if file doesn't exist
+  }
+}
 
 describe("preparePrompt integration tests", () => {
+  const originalRunnerTemp = process.env.RUNNER_TEMP;
+  let runnerTemp: string;
+
   beforeEach(async () => {
-    try {
-      await unlink("/tmp/claude-action/prompt.txt");
-    } catch {
-      // Ignore if file doesn't exist
-    }
+    // Inline prompts are written under RUNNER_TEMP; use a fresh directory per
+    // test so nothing depends on or leaks into the shared /tmp.
+    runnerTemp = await mkdtemp(join(tmpdir(), "prepare-prompt-"));
+    process.env.RUNNER_TEMP = runnerTemp;
   });
 
   afterEach(async () => {
-    try {
-      await unlink("/tmp/claude-action/prompt.txt");
-    } catch {
-      // Ignore if file doesn't exist
+    await rm(runnerTemp, { recursive: true, force: true });
+    if (originalRunnerTemp === undefined) {
+      delete process.env.RUNNER_TEMP;
+    } else {
+      process.env.RUNNER_TEMP = originalRunnerTemp;
     }
   });
 
-  test("should create temporary prompt file when only prompt is provided", async () => {
+  test("should create temporary prompt file under RUNNER_TEMP when only prompt is provided", async () => {
     const input: PreparePromptInput = {
       prompt: "This is a test prompt",
       promptFile: "",
@@ -29,7 +45,7 @@ describe("preparePrompt integration tests", () => {
 
     const config = await preparePrompt(input);
 
-    expect(config.path).toBe("/tmp/claude-action/prompt.txt");
+    expect(config.path).toBe(`${runnerTemp}/claude-action/prompt.txt`);
     expect(config.type).toBe("inline");
 
     const fileContent = await readFile(config.path, "utf-8");
@@ -39,8 +55,29 @@ describe("preparePrompt integration tests", () => {
     expect(fileStat.size).toBeGreaterThan(0);
   });
 
+  test("should fall back to /tmp for the inline prompt file when RUNNER_TEMP is unset", async () => {
+    delete process.env.RUNNER_TEMP;
+    await removeIfPresent(FALLBACK_PROMPT_PATH);
+    const input: PreparePromptInput = {
+      prompt: "Prompt without RUNNER_TEMP",
+      promptFile: "",
+    };
+
+    try {
+      const config = await preparePrompt(input);
+
+      expect(config.path).toBe(FALLBACK_PROMPT_PATH);
+      expect(config.type).toBe("inline");
+
+      const fileContent = await readFile(config.path, "utf-8");
+      expect(fileContent).toBe("Prompt without RUNNER_TEMP");
+    } finally {
+      await removeIfPresent(FALLBACK_PROMPT_PATH);
+    }
+  });
+
   test("should use existing file when promptFile is provided", async () => {
-    const testFilePath = "/tmp/test-prompt.txt";
+    const testFilePath = join(runnerTemp, "test-prompt.txt");
     await writeFile(testFilePath, "Prompt from file");
 
     const input: PreparePromptInput = {
@@ -52,8 +89,6 @@ describe("preparePrompt integration tests", () => {
 
     expect(config.path).toBe(testFilePath);
     expect(config.type).toBe("file");
-
-    await unlink(testFilePath);
   });
 
   test("should fail when neither prompt nor promptFile is provided", async () => {
@@ -79,7 +114,7 @@ describe("preparePrompt integration tests", () => {
   });
 
   test("should fail when prompt is empty", async () => {
-    const emptyFilePath = "/tmp/empty-prompt.txt";
+    const emptyFilePath = join(runnerTemp, "empty-prompt.txt");
     await writeFile(emptyFilePath, "");
 
     const input: PreparePromptInput = {
@@ -88,16 +123,10 @@ describe("preparePrompt integration tests", () => {
     };
 
     await expect(preparePrompt(input)).rejects.toThrow("Prompt file is empty");
-
-    try {
-      await unlink(emptyFilePath);
-    } catch {
-      // Ignore cleanup errors
-    }
   });
 
   test("should fail when both prompt and promptFile are provided", async () => {
-    const testFilePath = "/tmp/test-prompt.txt";
+    const testFilePath = join(runnerTemp, "test-prompt.txt");
     await writeFile(testFilePath, "Prompt from file");
 
     const input: PreparePromptInput = {
@@ -108,7 +137,5 @@ describe("preparePrompt integration tests", () => {
     await expect(preparePrompt(input)).rejects.toThrow(
       "Both 'prompt' and 'prompt_file' were provided. Please specify only one.",
     );
-
-    await unlink(testFilePath);
   });
 });

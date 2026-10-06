@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { GITHUB_API_URL } from "../github/api/config";
 import { Octokit } from "@octokit/rest";
+import { truncateForGitHubComment } from "../github/operations/comment-logic";
 import { updateClaudeComment } from "../github/operations/comments/update-claude-comment";
 import { redactSecrets, sanitizeContent } from "../github/utils/sanitizer";
 
@@ -57,19 +58,29 @@ server.tool(
 
       const sanitizedBody = redactSecrets(sanitizeContent(body));
 
+      // GitHub rejects bodies over the comment size limit with a 422, which
+      // would fail the whole progress update; cut the tail instead and tell
+      // the caller so it can shorten what it sends next time.
+      const finalBody = truncateForGitHubComment(sanitizedBody);
+      const truncated = finalBody !== sanitizedBody;
+
       const result = await updateClaudeComment(octokit, {
         owner,
         repo,
         commentId,
-        body: sanitizedBody,
+        body: finalBody,
         isPullRequestReviewComment,
       });
+
+      const payload = truncated
+        ? { ...result, truncated: true, originalLength: sanitizedBody.length }
+        : result;
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify(payload, null, 2),
           },
         ],
       };

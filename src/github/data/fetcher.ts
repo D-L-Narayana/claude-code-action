@@ -1,7 +1,16 @@
 import { execFileSync } from "child_process";
 import type { IssuesEvent } from "@octokit/webhooks-types";
 import type { Octokits } from "../api/client";
-import { ISSUE_QUERY, PR_QUERY, USER_QUERY } from "../api/queries/github";
+import {
+  ISSUE_COMMENTS_PAGE_QUERY,
+  ISSUE_QUERY,
+  PR_COMMENTS_PAGE_QUERY,
+  PR_FILES_PAGE_QUERY,
+  PR_QUERY,
+  PR_REVIEWS_PAGE_QUERY,
+  REVIEW_COMMENTS_PAGE_QUERY,
+  USER_QUERY,
+} from "../api/queries/github";
 import {
   isIssueCommentEvent,
   isIssuesEvent,
@@ -12,12 +21,19 @@ import {
 } from "../context";
 import type {
   GitHubComment,
+  GitHubConnection,
   GitHubFile,
   GitHubIssue,
+  GitHubPageInfo,
   GitHubPullRequest,
   GitHubReview,
+  IssueCommentsPageResponse,
   IssueQueryResponse,
+  PullRequestCommentsPageResponse,
+  PullRequestFilesPageResponse,
   PullRequestQueryResponse,
+  PullRequestReviewsPageResponse,
+  ReviewCommentsPageResponse,
 } from "../types";
 import type { CommentWithImages } from "../utils/image-downloader";
 import { downloadCommentImages } from "../utils/image-downloader";
@@ -362,6 +378,154 @@ export function filterCommentsByActor<
   );
 }
 
+/**
+ * Upper bound on pages fetched per connection (100 nodes each). Beyond this a
+ * thread is too long to render in full anyway, and the prompt budget keeps the
+ * newest items, so stopping here bounds API cost and latency.
+ */
+const MAX_PAGES = 5;
+
+type EntityQueryVariables = {
+  owner: string;
+  repo: string;
+  number: number;
+};
+
+/**
+ * Follows a connection's cursor and appends the nodes of every further page,
+ * in order, onto the first page already fetched by the initial query.
+ *
+ * GitHub returns connections oldest-first, so stopping at the first page
+ * would silently drop the newest comments/reviews/files — the ones a trigger
+ * most likely refers to. A connection without `pageInfo` came from a query
+ * (or a test fixture) that did not request it and is treated as complete.
+ * A failed follow-up page keeps what was already fetched instead of failing
+ * the whole run; the cap is reported so a truncated thread is visible in logs.
+ */
+async function fetchRemainingPages<TNode>(
+  connection: GitHubConnection<TNode> | null | undefined,
+  label: string,
+  fetchPage: (
+    after: string,
+  ) => Promise<GitHubConnection<TNode> | null | undefined>,
+): Promise<void> {
+  const firstPageInfo = connection?.pageInfo;
+  if (!connection || !firstPageInfo || !Array.isArray(connection.nodes)) {
+    return;
+  }
+
+  let pageInfo: GitHubPageInfo = firstPageInfo;
+  let pagesFetched = 1;
+  while (pageInfo.hasNextPage && pageInfo.endCursor) {
+    if (pagesFetched >= MAX_PAGES) {
+      console.warn(
+        `Stopped fetching ${label} after ${MAX_PAGES} pages (${connection.nodes.length} items); the remaining items are omitted`,
+      );
+      return;
+    }
+
+    let page: GitHubConnection<TNode> | null | undefined;
+    try {
+      page = await fetchPage(pageInfo.endCursor);
+    } catch (error) {
+      console.warn(
+        `Failed to fetch the next page of ${label}; continuing with the ${connection.nodes.length} items already fetched:`,
+        error,
+      );
+      return;
+    }
+    if (!page || !Array.isArray(page.nodes)) {
+      return;
+    }
+
+    connection.nodes.push(...page.nodes);
+    pagesFetched += 1;
+    if (!page.pageInfo) {
+      return;
+    }
+    pageInfo = page.pageInfo;
+  }
+}
+
+async function fetchRemainingPullRequestPages(
+  octokits: Octokits,
+  variables: EntityQueryVariables,
+  pullRequest: GitHubPullRequest,
+): Promise<void> {
+  const label = `PR #${variables.number}`;
+
+  await fetchRemainingPages(
+    pullRequest.comments,
+    `${label} comments`,
+    async (after) => {
+      const page = await octokits.graphql<PullRequestCommentsPageResponse>(
+        PR_COMMENTS_PAGE_QUERY,
+        { ...variables, after },
+      );
+      return page.repository.pullRequest?.comments;
+    },
+  );
+
+  await fetchRemainingPages(
+    pullRequest.reviews,
+    `${label} reviews`,
+    async (after) => {
+      const page = await octokits.graphql<PullRequestReviewsPageResponse>(
+        PR_REVIEWS_PAGE_QUERY,
+        { ...variables, after },
+      );
+      return page.repository.pullRequest?.reviews;
+    },
+  );
+
+  await fetchRemainingPages(
+    pullRequest.files,
+    `${label} files`,
+    async (after) => {
+      const page = await octokits.graphql<PullRequestFilesPageResponse>(
+        PR_FILES_PAGE_QUERY,
+        { ...variables, after },
+      );
+      return page.repository.pullRequest?.files;
+    },
+  );
+
+  // Inline comments are nested per review and page independently of the
+  // reviews connection, so each review (including ones from later pages) is
+  // walked on its own.
+  for (const review of pullRequest.reviews?.nodes ?? []) {
+    await fetchRemainingPages(
+      review.comments,
+      `${label} review ${review.databaseId} comments`,
+      async (after) => {
+        const page = await octokits.graphql<ReviewCommentsPageResponse>(
+          REVIEW_COMMENTS_PAGE_QUERY,
+          { reviewId: review.id, after },
+        );
+        return page.node?.comments;
+      },
+    );
+  }
+}
+
+async function fetchRemainingIssuePages(
+  octokits: Octokits,
+  variables: EntityQueryVariables,
+  issue: GitHubIssue,
+): Promise<void> {
+  await fetchRemainingPages(
+    issue.comments,
+    `issue #${variables.number} comments`,
+    async (after) => {
+      const page = await octokits.graphql<IssueCommentsPageResponse>(
+        ISSUE_COMMENTS_PAGE_QUERY,
+        { ...variables, after },
+      );
+      return page.repository.issue?.comments;
+    },
+  );
+}
+
 type FetchDataParams = {
   octokits: Octokits;
   repository: string;
@@ -405,6 +569,11 @@ export async function fetchGitHubData({
   if (!owner || !repo) {
     throw new Error("Invalid repository format. Expected 'owner/repo'.");
   }
+  const queryVariables: EntityQueryVariables = {
+    owner,
+    repo,
+    number: parseInt(prNumber, 10),
+  };
 
   let contextData: GitHubPullRequest | GitHubIssue | null = null;
   let comments: GitHubComment[] = [];
@@ -416,15 +585,18 @@ export async function fetchGitHubData({
       // Fetch PR data with all comments and file information
       const prResult = await octokits.graphql<PullRequestQueryResponse>(
         PR_QUERY,
-        {
-          owner,
-          repo,
-          number: parseInt(prNumber),
-        },
+        queryVariables,
       );
 
       if (prResult.repository.pullRequest) {
         const pullRequest = prResult.repository.pullRequest;
+        // Complete every connection before the trigger-time/actor filters run
+        // so comments, reviews and files beyond the first page are considered.
+        await fetchRemainingPullRequestPages(
+          octokits,
+          queryVariables,
+          pullRequest,
+        );
         contextData = pullRequest;
         if (pullRequest.files === null) {
           console.warn(
@@ -450,15 +622,13 @@ export async function fetchGitHubData({
       // Fetch issue data
       const issueResult = await octokits.graphql<IssueQueryResponse>(
         ISSUE_QUERY,
-        {
-          owner,
-          repo,
-          number: parseInt(prNumber),
-        },
+        queryVariables,
       );
 
       if (issueResult.repository.issue) {
-        contextData = issueResult.repository.issue;
+        const issue = issueResult.repository.issue;
+        await fetchRemainingIssuePages(octokits, queryVariables, issue);
+        contextData = issue;
         comments = filterCommentsByActor(
           filterCommentsToTriggerTime(
             contextData?.comments?.nodes || [],

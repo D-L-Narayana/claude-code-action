@@ -7,10 +7,32 @@ import type {
 } from "../types";
 import type { GitHubFileWithSHA } from "./fetcher";
 import { sanitizeContent } from "../utils/sanitizer";
+import {
+  DEFAULT_PROMPT_BUDGET,
+  keepNewest,
+  truncateText,
+  type PromptBudget,
+} from "../../create-prompt/budget";
+
+// Every formatter sanitizes GitHub content BEFORE truncating it. Cutting
+// first could leave an unterminated HTML comment or tag that the sanitizer no
+// longer recognizes, reopening the hidden-content channel it exists to close.
 
 function formatLabels(labelNodes: Array<{ name: string }>): string {
   if (labelNodes.length === 0) return "none";
   return labelNodes.map((l) => l.name).join(", ");
+}
+
+function replaceImageUrls(
+  text: string,
+  imageUrlMap: Map<string, string> | undefined,
+): string {
+  if (!imageUrlMap) return text;
+  let processed = text;
+  for (const [originalUrl, localPath] of imageUrlMap) {
+    processed = processed.replaceAll(originalUrl, localPath);
+  }
+  return processed;
 }
 
 export function formatContext(
@@ -42,121 +64,138 @@ Issue Labels: ${formatLabels(issueData.labels.nodes)}`;
 export function formatBody(
   body: string,
   imageUrlMap: Map<string, string>,
+  maxChars: number = DEFAULT_PROMPT_BUDGET.maxBodyChars,
 ): string {
-  let processedBody = body;
-
-  for (const [originalUrl, localPath] of imageUrlMap) {
-    processedBody = processedBody.replaceAll(originalUrl, localPath);
-  }
-
-  processedBody = sanitizeContent(processedBody);
-
-  return processedBody;
+  const processedBody = sanitizeContent(replaceImageUrls(body, imageUrlMap));
+  return truncateText(processedBody, maxChars, "body");
 }
 
 export function formatComments(
   comments: GitHubComment[],
   imageUrlMap?: Map<string, string>,
+  budget: Pick<
+    PromptBudget,
+    "maxCommentChars" | "maxCommentsChars"
+  > = DEFAULT_PROMPT_BUDGET,
 ): string {
-  return comments
-    .filter((comment) => !comment.isMinimized)
-    .map((comment) => {
-      let body = comment.body;
+  const visibleComments = comments.filter((comment) => !comment.isMinimized);
 
-      if (imageUrlMap && body) {
-        for (const [originalUrl, localPath] of imageUrlMap) {
-          body = body.replaceAll(originalUrl, localPath);
-        }
-      }
+  const renderComment = (comment: GitHubComment): string => {
+    const body = truncateText(
+      sanitizeContent(replaceImageUrls(comment.body, imageUrlMap)),
+      budget.maxCommentChars,
+      "comment",
+    );
+    return `[${comment.author?.login ?? "ghost"} at ${comment.createdAt}]: ${body}`;
+  };
 
-      body = sanitizeContent(body);
-
-      return `[${comment.author?.login ?? "ghost"} at ${comment.createdAt}]: ${body}`;
-    })
-    .join("\n\n");
+  // Chronological order is kept; when the section overflows, the oldest
+  // comments are the ones dropped.
+  return keepNewest(
+    visibleComments,
+    renderComment,
+    budget.maxCommentsChars,
+    "comments",
+  ).text;
 }
 
 export function formatReviewComments(
   reviewData: { nodes: GitHubReview[] } | null,
   imageUrlMap?: Map<string, string>,
+  budget: Pick<
+    PromptBudget,
+    "maxCommentChars" | "maxReviewsChars" | "maxDiffHunkChars"
+  > = DEFAULT_PROMPT_BUDGET,
 ): string {
   if (!reviewData || !reviewData.nodes) {
     return "";
   }
 
-  const formattedReviews = reviewData.nodes.map((review) => {
+  const renderReview = (review: GitHubReview): string => {
     let reviewOutput = `[Review by ${review.author?.login ?? "ghost"} at ${review.submittedAt}]: ${review.state}`;
 
     if (review.body && review.body.trim()) {
-      let body = review.body;
-
-      if (imageUrlMap) {
-        for (const [originalUrl, localPath] of imageUrlMap) {
-          body = body.replaceAll(originalUrl, localPath);
-        }
-      }
-
-      const sanitizedBody = sanitizeContent(body);
-      reviewOutput += `\n${sanitizedBody}`;
+      const body = truncateText(
+        sanitizeContent(replaceImageUrls(review.body, imageUrlMap)),
+        budget.maxCommentChars,
+        "review",
+      );
+      reviewOutput += `\n${body}`;
     }
 
-    if (
-      review.comments &&
-      review.comments.nodes &&
-      review.comments.nodes.length > 0
-    ) {
-      const comments = review.comments.nodes
-        .filter((comment) => !comment.isMinimized)
-        .map((comment) => {
-          let body = comment.body;
+    const inlineComments = (review.comments?.nodes ?? [])
+      .filter((comment) => !comment.isMinimized)
+      .map((comment) => {
+        const body = truncateText(
+          sanitizeContent(replaceImageUrls(comment.body, imageUrlMap)),
+          budget.maxCommentChars,
+          "comment",
+        );
 
-          if (imageUrlMap) {
-            for (const [originalUrl, localPath] of imageUrlMap) {
-              body = body.replaceAll(originalUrl, localPath);
-            }
-          }
+        let formatted = `  [Comment on ${comment.path}:${comment.line || "?"}]: ${body}`;
 
-          body = sanitizeContent(body);
+        // The diff hunk is the code the comment was left on. Without it the
+        // comment arrives without the context it was written against.
+        if (comment.diffHunk) {
+          const diffHunk = truncateText(
+            sanitizeContent(comment.diffHunk),
+            budget.maxDiffHunkChars,
+            "diff hunk",
+          );
+          formatted += `\n  Diff context:\n\`\`\`diff\n${diffHunk}\n\`\`\``;
+        }
 
-          let formatted = `  [Comment on ${comment.path}:${comment.line || "?"}]: ${body}`;
-
-          // The diff hunk is the code the comment was left on. Without it the
-          // comment arrives without the context it was written against.
-          if (comment.diffHunk) {
-            const diffHunk = sanitizeContent(comment.diffHunk);
-            formatted += `\n  Diff context:\n\`\`\`diff\n${diffHunk}\n\`\`\``;
-          }
-
-          return formatted;
-        })
-        .join("\n");
-      if (comments) {
-        reviewOutput += `\n${comments}`;
-      }
+        return formatted;
+      })
+      .join("\n");
+    if (inlineComments) {
+      reviewOutput += `\n${inlineComments}`;
     }
 
     return reviewOutput;
-  });
+  };
 
-  return formattedReviews.join("\n\n");
+  return keepNewest(
+    reviewData.nodes,
+    renderReview,
+    budget.maxReviewsChars,
+    "reviews",
+  ).text;
 }
 
-export function formatChangedFiles(changedFiles: GitHubFile[]): string {
-  return changedFiles
+function joinFileLines(
+  lines: string[],
+  totalFiles: number,
+  maxFiles: number,
+): string {
+  if (totalFiles <= maxFiles) {
+    return lines.join("\n");
+  }
+  return [...lines, `[… ${totalFiles - maxFiles} more files …]`].join("\n");
+}
+
+export function formatChangedFiles(
+  changedFiles: GitHubFile[],
+  maxFiles: number = DEFAULT_PROMPT_BUDGET.maxChangedFiles,
+): string {
+  const lines = changedFiles
+    .slice(0, maxFiles)
     .map(
       (file) =>
         `- ${file.path} (${file.changeType}) +${file.additions}/-${file.deletions}`,
-    )
-    .join("\n");
+    );
+  return joinFileLines(lines, changedFiles.length, maxFiles);
 }
 
 export function formatChangedFilesWithSHA(
   changedFiles: GitHubFileWithSHA[],
+  maxFiles: number = DEFAULT_PROMPT_BUDGET.maxChangedFiles,
 ): string {
-  return changedFiles
+  const lines = changedFiles
+    .slice(0, maxFiles)
     .map(
       (file) =>
         `- ${file.path} (${file.changeType}) +${file.additions}/-${file.deletions} SHA: ${file.sha}`,
-    )
-    .join("\n");
+    );
+  return joinFileLines(lines, changedFiles.length, maxFiles);
 }

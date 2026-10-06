@@ -4,11 +4,14 @@
  * Unified entrypoint for the Claude Code Action.
  * Merges all previously separate action.yml steps (prepare, install, run, cleanup)
  * into a single TypeScript orchestrator.
+ *
+ * Failure contract: library code throws (see src/utils/prepare-error.ts)
+ * instead of exiting the process, so every failure reaches the `finally`
+ * block in run(), which finalizes the tracking comment, writes the step
+ * summary and sets the action outputs.
  */
 
 import * as core from "@actions/core";
-import { dirname } from "path";
-import { spawn } from "child_process";
 import { appendFile } from "fs/promises";
 import { existsSync, readFileSync } from "fs";
 import { setupGitHubToken, WorkflowValidationSkipError } from "../github/token";
@@ -35,6 +38,8 @@ import { updateCommentLink } from "./update-comment-link";
 import { formatTurnsFromData } from "./format-turns";
 import type { Turn } from "./format-turns";
 import { redactSecrets } from "../github/utils/sanitizer";
+import { installClaudeCode } from "../install/claude-code-installer";
+import { PrepareError, isPrepareError } from "../utils/prepare-error";
 // Base-action imports (used directly instead of subprocess)
 import { setupWorkloadIdentity } from "../../base-action/src/workload-identity";
 import type { WorkloadIdentityHandle } from "../../base-action/src/workload-identity";
@@ -46,75 +51,19 @@ import { runClaude } from "../../base-action/src/run-claude";
 import type { ClaudeRunResult } from "../../base-action/src/run-claude-sdk";
 import { setExecutionFileOutputIfPresent } from "../../base-action/src/execution-file";
 
-// Exported for unit testing. `set -o pipefail` makes curl's non-zero exit
-// propagate through the pipe so the install retry logic actually triggers
-// on 429/403 instead of silently succeeding (see #1136).
-export function buildInstallCommand(version: string): string {
-  return `set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- ${version}`;
-}
+// The install command builder lives with the installer; re-exported so
+// existing imports keep resolving.
+export { buildInstallCommand } from "../install/claude-code-installer";
 
 /**
- * Install Claude Code CLI, handling retry logic and custom executable paths.
- * Returns the absolute path to the claude executable.
+ * Structural check for the SDK runner's failure error (ClaudeExecutionError
+ * in base-action/src/run-claude-sdk.ts). Matching on the name rather than the
+ * class keeps the check valid when the runner module is substituted in tests.
  */
-async function installClaudeCode(): Promise<string> {
-  const customExecutable = process.env.PATH_TO_CLAUDE_CODE_EXECUTABLE;
-  if (customExecutable) {
-    if (/[\x00-\x1f\x7f]/.test(customExecutable)) {
-      throw new Error(
-        "PATH_TO_CLAUDE_CODE_EXECUTABLE contains control characters (e.g. newlines), which is not allowed",
-      );
-    }
-    console.log(`Using custom Claude Code executable: ${customExecutable}`);
-    const claudeDir = dirname(customExecutable);
-    // Add to PATH by appending to GITHUB_PATH
-    const githubPath = process.env.GITHUB_PATH;
-    if (githubPath) {
-      await appendFile(githubPath, `${claudeDir}\n`);
-    }
-    // Also add to current process PATH
-    process.env.PATH = `${claudeDir}:${process.env.PATH}`;
-    return customExecutable;
-  }
-
-  const claudeCodeVersion = "2.1.283";
-  console.log(`Installing Claude Code v${claudeCodeVersion}...`);
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    console.log(`Installation attempt ${attempt}...`);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(
-          "bash",
-          ["-c", buildInstallCommand(claudeCodeVersion)],
-          { stdio: "inherit" },
-        );
-        child.on("close", (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`Install failed with exit code ${code}`));
-        });
-        child.on("error", reject);
-      });
-      console.log("Claude Code installed successfully");
-      // Add to PATH
-      const homeBin = `${process.env.HOME}/.local/bin`;
-      const githubPath = process.env.GITHUB_PATH;
-      if (githubPath) {
-        await appendFile(githubPath, `${homeBin}\n`);
-      }
-      process.env.PATH = `${homeBin}:${process.env.PATH}`;
-      return `${homeBin}/claude`;
-    } catch (error) {
-      if (attempt === 3) {
-        throw new Error(
-          `Failed to install Claude Code after 3 attempts: ${error}`,
-        );
-      }
-      console.log("Installation failed, retrying...");
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-  }
-  throw new Error("unreachable");
+function isClaudeExecutionError(
+  error: unknown,
+): error is Error & { sessionId?: string; executionFile?: string } {
+  return error instanceof Error && error.name === "ClaudeExecutionError";
 }
 
 /**
@@ -147,7 +96,7 @@ async function writeStepSummary(executionFile: string): Promise<void> {
   }
 }
 
-async function run() {
+export async function run(): Promise<void> {
   let githubToken: string | undefined;
   let commentId: number | undefined;
   let claudeBranch: string | undefined;
@@ -156,6 +105,9 @@ async function run() {
   let claudeSuccess = false;
   let prepareSuccess = true;
   let prepareError: string | undefined;
+  // Only set once Claude ran or the run failed, so the skip paths (workflow
+  // validation mismatch, no trigger) leave the `conclusion` output empty.
+  let conclusion: "success" | "failure" | undefined;
   let context: GitHubContext | undefined;
   let octokit: Octokits | undefined;
   let workloadIdentity: WorkloadIdentityHandle | undefined;
@@ -228,7 +180,17 @@ async function run() {
     );
     const prepareResult =
       modeName === "tag"
-        ? await prepareTagMode({ context, octokit, githubToken })
+        ? await prepareTagMode({
+            context,
+            octokit,
+            githubToken,
+            // Learn the tracking comment id as soon as the comment exists, so
+            // the finally block can finalize it even when a later prepare step
+            // throws before prepareTagMode returns.
+            onTrackingComment: (id) => {
+              commentId = id;
+            },
+          })
         : await prepareAgentMode({ context, octokit, githubToken });
 
     commentId = prepareResult.commentId;
@@ -236,8 +198,20 @@ async function run() {
     baseBranch = prepareResult.branchInfo.baseBranch;
     prepareCompleted = true;
 
-    // Phase 2: Install Claude Code CLI
-    const claudeExecutable = await installClaudeCode();
+    // Phase 2: Install Claude Code CLI. Claude has not run yet, so an install
+    // failure is reported like a prepare failure (with the error text in the
+    // tracking comment).
+    let claudeExecutable: string;
+    try {
+      claudeExecutable = await installClaudeCode();
+    } catch (error) {
+      if (isPrepareError(error)) throw error;
+      throw new PrepareError(
+        "install",
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
 
     // Phase 3: Run Claude (import base-action directly)
     // Set env vars needed by the base-action code
@@ -300,6 +274,7 @@ async function run() {
     });
 
     claudeSuccess = claudeResult.conclusion === "success";
+    conclusion = claudeResult.conclusion;
     executionFile = claudeResult.executionFile;
 
     // Set action-level outputs
@@ -312,12 +287,35 @@ async function run() {
     if (claudeResult.structuredOutput) {
       core.setOutput("structured_output", claudeResult.structuredOutput);
     }
-    core.setOutput("conclusion", claudeResult.conclusion);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    conclusion = "failure";
     executionFile ??= setExecutionFileOutputIfPresent();
-    // Only mark as prepare failure if we haven't completed the prepare phase
-    if (!prepareCompleted) {
+    if (isClaudeExecutionError(error)) {
+      // The SDK produced a session before failing: expose it so the run can
+      // be resumed with --resume and its log can be located.
+      if (error.sessionId) {
+        core.setOutput("session_id", error.sessionId);
+      }
+      if (
+        !executionFile &&
+        error.executionFile &&
+        existsSync(error.executionFile)
+      ) {
+        executionFile = error.executionFile;
+        core.setOutput("execution_file", executionFile);
+      }
+    }
+    if (isPrepareError(error)) {
+      // Thrown by the prepare/install steps before Claude ran: the tracking
+      // comment names the failing step and shows the error.
+      console.error(
+        `Step '${error.step}' failed: ${redactSecrets(errorMessage)}`,
+      );
+      prepareSuccess = false;
+      prepareError = `${error.step}: ${errorMessage}`;
+    } else if (!prepareCompleted) {
+      // Only mark as prepare failure if we haven't completed the prepare phase
       prepareSuccess = false;
       prepareError = errorMessage;
     }
@@ -368,6 +366,9 @@ async function run() {
     }
 
     // Set remaining action-level outputs
+    if (conclusion) {
+      core.setOutput("conclusion", conclusion);
+    }
     core.setOutput("branch_name", claudeBranch);
     core.setOutput("github_token", githubToken);
   }

@@ -1,3 +1,5 @@
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { parse as parseShellArgs } from "shell-quote";
 import type { ClaudeOptions } from "./run-claude";
 import type { Options as SdkOptions } from "@anthropic-ai/claude-agent-sdk";
@@ -54,59 +56,86 @@ function unescapeShellMeta(s: string): string {
   return s.replace(SHELL_META_UNESCAPE_RE, (c) => SHELL_META_UNESCAPE.get(c)!);
 }
 
-type McpConfig = {
-  mcpServers?: Record<string, unknown>;
-};
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
- * Merge multiple MCP config values into a single config.
- * Each config can be a JSON string or a file path.
- * For JSON strings, mcpServers objects are merged.
- * For file paths, they are kept as-is (user's file takes precedence and is used last).
+ * Parse one MCP config document (inline JSON or the contents of a file) and
+ * return its mcpServers map. A document without mcpServers contributes nothing.
+ */
+function mcpServersFromDocument(json: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(json);
+  if (!isJsonObject(parsed)) {
+    throw new Error("top-level value is not a JSON object");
+  }
+  const servers = parsed.mcpServers;
+  if (servers === undefined) {
+    return {};
+  }
+  if (!isJsonObject(servers)) {
+    throw new Error('"mcpServers" is not a JSON object');
+  }
+  return servers;
+}
+
+function mcpServersFromInline(json: string): Record<string, unknown> {
+  try {
+    return mcpServersFromDocument(json);
+  } catch (error) {
+    // Do not echo the config itself: inline configs may carry secrets
+    throw new Error(
+      `--mcp-config inline JSON could not be parsed: ${errorReason(error)}`,
+    );
+  }
+}
+
+function mcpServersFromFile(path: string): Record<string, unknown> {
+  try {
+    // Relative paths are resolved against the working directory, exactly as
+    // the CLI would resolve them when handed the path directly
+    return mcpServersFromDocument(readFileSync(resolve(path), "utf-8"));
+  } catch (error) {
+    throw new Error(
+      `--mcp-config file '${path}' could not be read or parsed: ${errorReason(error)}`,
+    );
+  }
+}
+
+/**
+ * Merge multiple --mcp-config values into a single inline JSON config.
+ *
+ * The action always prepends its own servers (github_comment, github_ci, ...)
+ * as inline JSON, and users may add servers either inline or — the documented
+ * way to pass secrets to MCP servers — as a path to a JSON file. The Agent
+ * SDK's extraArgs can only carry one value per flag, so every value is read
+ * here and their mcpServers maps are combined. Values are applied in argument
+ * order: a later value overrides an earlier server of the same name, so a
+ * user's config wins over the built-in servers.
+ *
+ * A single file path with no inline JSON is returned unchanged and left for
+ * the CLI to read itself.
  */
 function mergeMcpConfigs(configValues: string[]): string {
-  const merged: McpConfig = { mcpServers: {} };
-  let lastFilePath: string | null = null;
-
-  for (const config of configValues) {
-    const trimmed = config.trim();
-    if (!trimmed) continue;
-
-    // Check if it's a JSON string (starts with {) or a file path
-    if (trimmed.startsWith("{")) {
-      try {
-        const parsed = JSON.parse(trimmed) as McpConfig;
-        if (parsed.mcpServers) {
-          Object.assign(merged.mcpServers!, parsed.mcpServers);
-        }
-      } catch {
-        // If JSON parsing fails, treat as file path
-        lastFilePath = trimmed;
-      }
-    } else {
-      // It's a file path - store it to handle separately
-      lastFilePath = trimmed;
-    }
+  const values = configValues.map((value) => value.trim()).filter(Boolean);
+  const [onlyValue] = values;
+  if (values.length === 1 && onlyValue && !onlyValue.startsWith("{")) {
+    return onlyValue;
   }
 
-  // If we have file paths, we need to keep the merged JSON and let the file
-  // be handled separately. Since we can only return one value, merge what we can.
-  // If there's a file path, we need a different approach - read the file at runtime.
-  // For now, if there's a file path, we'll stringify the merged config.
-  // The action prepends its config as JSON, so we can safely merge inline JSON configs.
-
-  // If no inline configs were found (all file paths), return the last file path
-  if (Object.keys(merged.mcpServers!).length === 0 && lastFilePath) {
-    return lastFilePath;
+  const mergedServers: Record<string, unknown> = {};
+  for (const value of values) {
+    const servers = value.startsWith("{")
+      ? mcpServersFromInline(value)
+      : mcpServersFromFile(value);
+    Object.assign(mergedServers, servers);
   }
 
-  // Note: If user passes a file path, we cannot merge it at parse time since
-  // we don't have access to the file system here. The action's built-in MCP
-  // servers are always passed as inline JSON, so they will be merged.
-  // If user also passes inline JSON, it will be merged.
-  // If user passes a file path, they should ensure it includes all needed servers.
-
-  return JSON.stringify(merged);
+  return JSON.stringify({ mcpServers: mergedServers });
 }
 
 /**

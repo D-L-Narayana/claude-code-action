@@ -121,3 +121,26 @@ A human counts as an approver by either:
 - **No checkout of PR code.** The action never checks out the PR's branch;
   it reads PR metadata via the GitHub API, so the usual
   `pull_request_target` code-execution risk does not apply.
+
+## Running the tests
+
+The unit tests in [`tests/`](./tests) cover the approval-counting rules,
+agent detection, config loading, event handling and the GitHub client (against
+an in-process mock transport). They need no network access and no GitHub
+token. [`requirements-dev.txt`](./requirements-dev.txt) pins the same runtime
+dependencies as `action.yml` plus `pytest`. The accompanying `pytest.ini`
+disables pytest's cache plugin, so a test run leaves no `.pytest_cache`
+directory behind.
+
+From the repository root, with [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv run --with-requirements agent-approval-check/requirements-dev.txt pytest -q agent-approval-check/tests
+```
+
+Or, once the dependencies are installed in your environment
+(`pip install -r agent-approval-check/requirements-dev.txt`):
+
+```bash
+python -m pytest agent-approval-check/tests
+```

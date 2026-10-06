@@ -316,6 +316,8 @@ The MCP config file should follow this format:
 }
 ```
 
+`--mcp-config` may be repeated and may mix inline JSON with file paths. When more than one value is given, every value is read and merged before Claude Code starts, later values overriding earlier servers of the same name; a file that cannot be read or does not contain valid JSON, or an inline value that does not parse, then fails the run with an error naming the offending value rather than being silently ignored. A single file path is handed to Claude Code unchanged.
+
 You can combine MCP config with other inputs like allowed tools:
 
 ```yaml
@@ -342,6 +344,9 @@ on:
 jobs:
   code-review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # needed by the comment step below
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -422,14 +427,16 @@ You can authenticate with Claude using any of these methods:
 1. Direct Anthropic API (default) - requires API key or OAuth token
 2. Amazon Bedrock - requires OIDC authentication and automatically uses cross-region inference profiles
 3. Google Vertex AI - requires OIDC authentication
+4. Microsoft Foundry - requires OIDC authentication
 
 **Note**:
 
-- Bedrock and Vertex use OIDC authentication exclusively
+- Bedrock, Vertex, and Foundry use OIDC authentication exclusively
 - AWS Bedrock automatically uses cross-region inference profiles for certain models
 - For cross-region inference profile models, you need to request and be granted access to the Claude models in all regions that the inference profile uses
 - The Bedrock API endpoint URL is automatically constructed using the AWS_REGION environment variable (e.g., `https://bedrock-runtime.us-west-2.amazonaws.com`)
 - You can override the Bedrock API endpoint URL by setting the `ANTHROPIC_BEDROCK_BASE_URL` environment variable
+- For Microsoft Foundry (`use_foundry: "true"`), point the action at your resource with either the `ANTHROPIC_FOUNDRY_RESOURCE` (resource name) or the `ANTHROPIC_FOUNDRY_BASE_URL` (full endpoint URL) environment variable. `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_DEFAULT_OPUS_MODEL` are forwarded as well, for mapping Claude Code's default model aliases to the deployments in your resource
 
 ### Model Configuration
 
@@ -471,6 +478,23 @@ Use provider-specific model names based on your chosen provider:
     prompt: "Your prompt here"
     claude_args: "--model claude-3-7-sonnet@20250219"
     use_vertex: "true"
+
+# For Microsoft Foundry (requires OIDC authentication)
+- name: Authenticate to Azure
+  uses: azure/login@v2
+  with:
+    client-id: ${{ secrets.AZURE_CLIENT_ID }}
+    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+    subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+- name: Run Claude Code with Microsoft Foundry
+  uses: anthropics/claude-code-base-action@beta
+  with:
+    prompt: "Your prompt here"
+    claude_args: "--model claude-sonnet-4-5"
+    use_foundry: "true"
+  env:
+    ANTHROPIC_FOUNDRY_BASE_URL: https://my-resource.services.ai.azure.com
 ```
 
 ## Example: Using OIDC Authentication for AWS Bedrock
@@ -513,6 +537,33 @@ This example shows how to use OIDC authentication with GCP Vertex AI:
     claude_args: |
       --model "claude-3-7-sonnet@20250219"
       --allowedTools "Bash(git:*),Read,Glob,Grep"
+```
+
+## Example: Using OIDC Authentication for Microsoft Foundry
+
+This example shows how to use OIDC authentication with Microsoft Foundry. The job needs `id-token: write` for `azure/login`:
+
+```yaml
+- name: Authenticate to Azure
+  uses: azure/login@v2
+  with:
+    client-id: ${{ secrets.AZURE_CLIENT_ID }}
+    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+    subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+- name: Run Claude Code with Microsoft Foundry OIDC
+  uses: anthropics/claude-code-base-action@beta
+  with:
+    prompt: "Your prompt here"
+    use_foundry: "true"
+    claude_args: |
+      --model "claude-sonnet-4-5"
+      --allowedTools "Bash(git:*),Read,Glob,Grep"
+  env:
+    # Either the resource name ...
+    ANTHROPIC_FOUNDRY_RESOURCE: my-resource
+    # ... or the full endpoint URL:
+    # ANTHROPIC_FOUNDRY_BASE_URL: https://my-resource.services.ai.azure.com
 ```
 
 ## Security Best Practices

@@ -21,6 +21,25 @@ type AppTokenExchangeErrorResponse = {
   message?: string;
 };
 
+type FetchFn = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export type TokenExchangeOptions = {
+  /** Replacement for the global fetch; tests inject a controlled one. */
+  fetchFn?: FetchFn;
+  /** How long one exchange attempt may take before it is aborted. */
+  timeoutMs?: number;
+};
+
+const APP_TOKEN_EXCHANGE_URL =
+  "https://api.anthropic.com/api/github/github-app-token-exchange";
+
+// Without a deadline, a hung socket keeps a single attempt pending forever,
+// and retryWithBackoff never gets a settled promise to retry from.
+const DEFAULT_EXCHANGE_TIMEOUT_MS = 30_000;
+
 const WORKFLOW_VALIDATION_ERROR_CODES = new Set([
   "workflow_not_found_on_default_branch",
 ]);
@@ -51,6 +70,18 @@ function isWorkflowValidationError(
   return [responseJson.message, responseJson.error?.message].some((message) =>
     message?.toLowerCase().includes(workflowValidationMessage),
   );
+}
+
+/**
+ * Whether an error came from the abort signal firing. AbortSignal.timeout
+ * rejects with a DOMException named "TimeoutError"; a manual abort uses
+ * "AbortError". Checked by name because the DOMException class differs
+ * between runtimes.
+ */
+function isAbortError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { name } = error as { name?: unknown };
+  return name === "AbortError" || name === "TimeoutError";
 }
 
 async function getOidcToken(): Promise<string> {
@@ -103,6 +134,10 @@ export function parseAdditionalPermissions():
 async function exchangeForAppToken(
   oidcToken: string,
   permissions?: Record<string, string>,
+  {
+    fetchFn = fetch,
+    timeoutMs = DEFAULT_EXCHANGE_TIMEOUT_MS,
+  }: TokenExchangeOptions = {},
 ): Promise<string> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${oidcToken}`,
@@ -110,6 +145,7 @@ async function exchangeForAppToken(
   const fetchOptions: RequestInit = {
     method: "POST",
     headers,
+    signal: AbortSignal.timeout(timeoutMs),
   };
 
   if (permissions) {
@@ -117,17 +153,27 @@ async function exchangeForAppToken(
     fetchOptions.body = JSON.stringify({ permissions });
   }
 
-  const response = await fetch(
-    "https://api.anthropic.com/api/github/github-app-token-exchange",
-    fetchOptions,
-  );
+  let response: Response;
+  let responseJson: unknown;
+  try {
+    response = await fetchFn(APP_TOKEN_EXCHANGE_URL, fetchOptions);
+    // The signal also governs reading the body, so a stalled body read
+    // surfaces here as well.
+    responseJson = await response.json();
+  } catch (error) {
+    if (isAbortError(error)) {
+      // A plain Error, not a WorkflowValidationSkipError, so that
+      // retryWithBackoff treats the timeout as retryable.
+      throw new Error(`App token exchange timed out after ${timeoutMs} ms`);
+    }
+    throw error;
+  }
 
   if (!response.ok) {
-    const responseJson =
-      (await response.json()) as AppTokenExchangeErrorResponse;
+    const errorResponse = responseJson as AppTokenExchangeErrorResponse;
 
-    if (isWorkflowValidationError(response.status, responseJson)) {
-      const message = getAppTokenExchangeErrorMessage(responseJson);
+    if (isWorkflowValidationError(response.status, errorResponse)) {
+      const message = getAppTokenExchangeErrorMessage(errorResponse);
       core.warning(`Skipping action due to workflow validation: ${message}`);
       console.log(
         "Action skipped due to workflow validation error. This is expected when adding Claude Code workflows to new repositories or on PRs with workflow changes. If you're seeing this, your workflow will begin working once you merge your PR.",
@@ -135,14 +181,14 @@ async function exchangeForAppToken(
       throw new WorkflowValidationSkipError(message);
     }
 
-    const message = getAppTokenExchangeErrorMessage(responseJson);
+    const message = getAppTokenExchangeErrorMessage(errorResponse);
     console.error(
       `App token exchange failed: ${response.status} ${response.statusText} - ${message}`,
     );
     throw new Error(message);
   }
 
-  const appTokenData = (await response.json()) as {
+  const appTokenData = responseJson as {
     token?: string;
     app_token?: string;
   };
@@ -155,7 +201,9 @@ async function exchangeForAppToken(
   return appToken;
 }
 
-export async function setupGitHubToken(): Promise<string> {
+export async function setupGitHubToken(
+  options: TokenExchangeOptions = {},
+): Promise<string> {
   // Check if GitHub token was provided as override
   const providedToken = process.env.OVERRIDE_GITHUB_TOKEN;
 
@@ -172,7 +220,7 @@ export async function setupGitHubToken(): Promise<string> {
 
   console.log("Exchanging OIDC token for app token...");
   const appToken = await retryWithBackoff(
-    () => exchangeForAppToken(oidcToken, permissions),
+    () => exchangeForAppToken(oidcToken, permissions, options),
     {
       shouldRetry: (error) => !(error instanceof WorkflowValidationSkipError),
     },

@@ -1,17 +1,10 @@
-#!/usr/bin/env bun
-
-import { createOctokit } from "../github/api/client";
 import type { Octokits } from "../github/api/client";
 import * as fs from "fs/promises";
 import {
   updateCommentBody,
   type CommentUpdateInput,
 } from "../github/operations/comment-logic";
-import {
-  parseGitHubContext,
-  isPullRequestReviewCommentEvent,
-  isEntityContext,
-} from "../github/context";
+import { isPullRequestReviewCommentEvent } from "../github/context";
 import type { ParsedGitHubContext } from "../github/context";
 import { GITHUB_SERVER_URL } from "../github/api/config";
 import { checkAndCommitOrDeleteBranch } from "../github/operations/branch-cleanup";
@@ -246,41 +239,4 @@ export async function updateCommentLink(
     );
     throw updateError;
   }
-}
-
-async function run() {
-  try {
-    const context = parseGitHubContext();
-    if (!isEntityContext(context)) {
-      throw new Error("update-comment-link requires an entity context");
-    }
-
-    const githubToken = process.env.GITHUB_TOKEN!;
-    const octokit = createOctokit(githubToken);
-
-    await updateCommentLink({
-      commentId: parseInt(process.env.CLAUDE_COMMENT_ID!),
-      githubToken,
-      claudeBranch: process.env.CLAUDE_BRANCH,
-      baseBranch:
-        process.env.BASE_BRANCH || context.repository.default_branch || "main",
-      triggerUsername: process.env.TRIGGER_USERNAME,
-      context,
-      octokit,
-      claudeSuccess: process.env.CLAUDE_SUCCESS !== "false",
-      outputFile: process.env.OUTPUT_FILE,
-      prepareSuccess: process.env.PREPARE_SUCCESS !== "false",
-      prepareError: process.env.PREPARE_ERROR,
-      useCommitSigning: process.env.USE_COMMIT_SIGNING === "true",
-    });
-
-    process.exit(0);
-  } catch (error) {
-    console.error("Error updating comment with job link:", error);
-    process.exit(1);
-  }
-}
-
-if (import.meta.main) {
-  run();
 }

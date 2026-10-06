@@ -1,6 +1,63 @@
 import { GITHUB_SERVER_URL } from "../api/config";
+import { GITHUB_COMMENT_MAX_LENGTH } from "../constants";
 import { redactSecrets } from "../utils/sanitizer";
-import { encodeBranchNameForUrl } from "./comments/common";
+import { encodeBranchNameForUrl, openCodeFence } from "./comments/common";
+
+function truncationMarker(droppedCharacters: number): string {
+  return `\n\n…[truncated ${droppedCharacters} characters]…`;
+}
+
+/** Step `index` back by one if it would split a UTF-16 surrogate pair. */
+function alignToCodePoint(text: string, index: number): number {
+  const before = text.charCodeAt(index - 1);
+  const after = text.charCodeAt(index);
+  const splitsPair =
+    before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  return splitsPair ? index - 1 : index;
+}
+
+/**
+ * Cut `body` so it fits GitHub's comment size limit, which the API enforces
+ * with a 422 on the final update. The leading header block that
+ * updateCommentBody emits (status line, links and any error code block,
+ * everything through the first "\n\n---\n" separator) survives whenever it
+ * fits; the trailing content is dropped behind a marker that says how many
+ * characters are missing. When even the header does not fit, it is hard-cut
+ * the same way. A code block the cut lands inside is closed first so the
+ * marker renders as text instead of as more code.
+ *
+ * Length is measured in UTF-16 code units (String.length). GitHub counts
+ * characters, and a code unit count is never smaller than a character count,
+ * so a body that passes this check cannot exceed the limit however GitHub
+ * tallies it; it is also the native string length, so the only cut-site
+ * concern is not splitting a surrogate pair.
+ */
+export function truncateForGitHubComment(
+  body: string,
+  maxLength: number = GITHUB_COMMENT_MAX_LENGTH,
+): string {
+  if (body.length <= maxLength) {
+    return body;
+  }
+
+  // Reserve room for the longest marker that could be emitted so the exact
+  // count can be filled in after the cut without pushing past the limit.
+  const reserved = truncationMarker(body.length).length;
+  let cut = alignToCodePoint(body, Math.max(0, maxLength - reserved));
+  let closer = "";
+  for (;;) {
+    const fence = openCodeFence(body.slice(0, cut));
+    closer = fence ? `\n${fence}` : "";
+    if (cut === 0 || cut + closer.length + reserved <= maxLength) {
+      break;
+    }
+    // The closer needs room of its own; move the cut back and re-check, since
+    // the block it closes may itself have started inside the removed span.
+    cut = alignToCodePoint(body, Math.max(0, cut - closer.length));
+  }
+
+  return `${body.slice(0, cut)}${closer}${truncationMarker(body.length - cut)}`;
+}
 
 export type ExecutionDetails = {
   total_cost_usd?: number;
@@ -203,5 +260,7 @@ export function updateCommentBody(input: CommentUpdateInput): string {
   // Add the cleaned body content
   newBody += bodyContent;
 
-  return newBody.trim();
+  // Claude's progress updates can grow the tracked body right up to the
+  // limit; adding the header on top must not turn the final PATCH into a 422.
+  return truncateForGitHubComment(newBody.trim());
 }

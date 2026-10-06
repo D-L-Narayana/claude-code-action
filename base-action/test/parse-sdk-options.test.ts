@@ -3,6 +3,9 @@
 import { describe, test, expect } from "bun:test";
 import { parseSdkOptions } from "../src/parse-sdk-options";
 import type { ClaudeOptions } from "../src/run-claude";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 
 describe("parseSdkOptions", () => {
   describe("allowedTools merging", () => {
@@ -338,21 +341,38 @@ describe("parseSdkOptions", () => {
       );
     });
 
-    test("should merge inline JSON configs when file path is also present", () => {
-      // When action provides inline JSON and user provides a file path,
-      // the inline JSON configs should be merged (file paths cannot be merged at parse time)
-      const options: ClaudeOptions = {
-        claudeArgs: `--mcp-config '{"mcpServers":{"github_comment":{"command":"node"}}}' --mcp-config '{"mcpServers":{"github_ci":{"command":"node"}}}' --mcp-config /tmp/user-config.json`,
-      };
+    test("should merge inline JSON configs when file path is also present", async () => {
+      // The action provides its servers as inline JSON and the user provides a
+      // file path (the documented way to pass secrets to MCP servers). Servers
+      // from both sources must end up in the single merged config.
+      const tempDir = await mkdtemp(join(tmpdir(), "parse-sdk-options-"));
+      try {
+        const userConfigPath = join(tempDir, "user-config.json");
+        await writeFile(
+          userConfigPath,
+          JSON.stringify({
+            mcpServers: { user_server: { command: "custom", args: ["run"] } },
+          }),
+        );
+        const options: ClaudeOptions = {
+          claudeArgs: `--mcp-config '{"mcpServers":{"github_comment":{"command":"node"}}}' --mcp-config '{"mcpServers":{"github_ci":{"command":"node"}}}' --mcp-config ${userConfigPath}`,
+        };
 
-      const result = parseSdkOptions(options);
+        const result = parseSdkOptions(options);
 
-      // The inline JSON configs should be merged
-      const mcpConfig = JSON.parse(
-        result.sdkOptions.extraArgs?.["mcp-config"] as string,
-      );
-      expect(mcpConfig.mcpServers).toHaveProperty("github_comment");
-      expect(mcpConfig.mcpServers).toHaveProperty("github_ci");
+        const mcpConfig = JSON.parse(
+          result.sdkOptions.extraArgs?.["mcp-config"] as string,
+        );
+        expect(mcpConfig.mcpServers).toHaveProperty("github_comment");
+        expect(mcpConfig.mcpServers).toHaveProperty("github_ci");
+        expect(mcpConfig.mcpServers).toHaveProperty("user_server");
+        expect(mcpConfig.mcpServers.user_server).toEqual({
+          command: "custom",
+          args: ["run"],
+        });
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
     });
 
     test("should handle mcp-config with other flags", () => {

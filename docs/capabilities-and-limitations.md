@@ -17,9 +17,9 @@
 
 - **Submit PR Reviews**: Claude cannot submit formal GitHub PR reviews
 - **Approve PRs**: For security reasons, Claude cannot approve pull requests
-- **Post Multiple Comments**: Claude only acts by updating its initial comment
+- **Post Multiple Comments**: Claude only acts by updating its initial comment (on pull requests, inline review comments can additionally be enabled by allowing `mcp__github_inline_comment__create_inline_comment`)
 - **Execute Commands Outside Its Context**: Claude only has access to the repository and PR/issue context it's triggered in
-- **Run Arbitrary Bash Commands**: By default, Claude cannot execute Bash commands unless explicitly allowed using the `allowed_tools` configuration
+- **Run Arbitrary Bash Commands**: By default, Claude cannot execute Bash commands unless they are explicitly allowed via `claude_args` with `--allowedTools` (for example `--allowedTools "Bash(npm test)"`)
 - **Perform Branch Operations**: Cannot merge branches, rebase, or perform other git operations beyond pushing commits
 
 ## How It Works
@@ -30,4 +30,6 @@
 4. **Branch Management**: Creates new PRs for human authors, pushes directly for Claude's own PRs
 5. **Communication**: Posts updates at every step to keep you informed
 
-This action is built on top of [`anthropics/claude-code-base-action`](https://github.com/anthropics/claude-code-base-action).
+The size limits, timeouts and failure handling that apply to prompts, comments and reports are listed in [Limits and Safeguards](./limits.md).
+
+This action is built on top of [`anthropics/claude-code-base-action`](https://github.com/anthropics/claude-code-base-action), a lower-level building block that only installs and runs Claude Code with the inputs you give it. The base action does none of the above — no trigger detection, permission checks, prompt construction, tracking comments or branch handling — so use it only when you are building your own workflow around Claude Code with trusted input (see [Security](./security.md#claude-code-action-vs-claude-code-base-action)).

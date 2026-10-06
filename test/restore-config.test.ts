@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  setDefaultTimeout,
+  test,
+} from "bun:test";
 import { execFileSync } from "child_process";
 import {
   existsSync,
@@ -15,6 +22,12 @@ import { dirname, isAbsolute, join } from "path";
 import { restoreConfigFromBase } from "../src/github/operations/restore-config";
 
 const CLAUDE_PR_EXCLUDE_PATTERN = "/.claude-pr/";
+
+// Every test here builds two real git repositories and runs a few dozen git
+// subprocesses (init, commit, push, fetch, checkout). That takes 2-6 s on a
+// quiet machine and more under load, so the 5 s default timeout turns host
+// contention into spurious failures. The assertions are unchanged.
+setDefaultTimeout(60_000);
 
 describe("restoreConfigFromBase", () => {
   let originalCwd: string;

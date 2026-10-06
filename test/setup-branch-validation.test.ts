@@ -2,6 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { setupBranch } from "../src/github/operations/branch";
+import { PrepareError } from "../src/utils/prepare-error";
 import { createMockContext } from "./mockContext";
 
 const octokits = {
@@ -19,14 +20,12 @@ const githubData = {
 // check and only fail on the file ops server's first commit (a 422).
 const INVALID_TEMPLATE = "{{prefix}}release:{{entityNumber}}";
 
-const loggedErrors: string[] = [];
-
 describe("setupBranch generated branch name validation", () => {
   let originalCwd: string;
   let tempDir: string;
-  let exitCode: number | undefined;
+  // Safety net only: should setupBranch ever regress to process.exit(1), fail
+  // the assertions below instead of taking the whole test runner down.
   let originalExit: typeof process.exit;
-  let originalError: typeof console.error;
 
   beforeEach(() => {
     originalCwd = process.cwd();
@@ -35,22 +34,14 @@ describe("setupBranch generated branch name validation", () => {
     tempDir = mkdtempSync(join("/tmp", "setup-branch-"));
     process.chdir(tempDir);
 
-    exitCode = undefined;
-    loggedErrors.length = 0;
     originalExit = process.exit;
-    originalError = console.error;
-    console.error = (...args: unknown[]) => {
-      loggedErrors.push(args.map(String).join(" "));
-    };
-    process.exit = ((code?: number) => {
-      exitCode = code;
+    process.exit = (() => {
       throw new Error("process.exit called");
     }) as typeof process.exit;
   });
 
   afterEach(() => {
     process.exit = originalExit;
-    console.error = originalError;
     process.chdir(originalCwd);
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -67,14 +58,18 @@ describe("setupBranch generated branch name validation", () => {
         },
       });
 
-      await expect(setupBranch(octokits, githubData, context)).rejects.toThrow(
-        "process.exit called",
-      );
-      expect(exitCode).toBe(1);
+      const result = setupBranch(octokits, githubData, context);
+
+      // Throwing (rather than exiting) is what lets run.ts reach its finally
+      // block and update the tracking comment.
+      await expect(result).rejects.toBeInstanceOf(PrepareError);
+      const error = (await result.catch((e: unknown) => e)) as PrepareError;
+      expect(error.step).toBe("branch");
       // Must fail on the name itself, not on a later git or API call.
-      expect(loggedErrors.join("\n")).toContain(
+      expect(error.message).toContain(
         'Invalid branch name: "claude/release:42"',
       );
+      expect(error.cause).toBeInstanceOf(Error);
     });
   }
 });

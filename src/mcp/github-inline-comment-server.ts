@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { appendFileSync } from "fs";
+import { appendFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
 import { z } from "zod";
 import { createOctokit } from "../github/api/client";
 import { redactSecrets, sanitizeContent } from "../github/utils/sanitizer";
-import { removeBufferedComment } from "./inline-comment-buffer";
+import {
+  getInlineCommentBufferPath,
+  removeBufferedComment,
+} from "./inline-comment-buffer";
 
 // Get repository and PR information from environment variables
 const REPO_OWNER = process.env.REPO_OWNER;
@@ -15,8 +19,9 @@ const PR_NUMBER = process.env.PR_NUMBER;
 // Calls without confirmed=true are buffered here instead of posted. This
 // prevents subagents from posting test/probe comments when they inherit this
 // tool and probe it after hitting unrelated errors. The action's post-step
-// reports the buffer count for diagnostics.
-const BUFFER_PATH = "/tmp/inline-comments-buffer.jsonl";
+// reports the buffer count for diagnostics. The path is keyed by repository,
+// PR and run so buffers cannot leak between jobs on a shared runner.
+const BUFFER_PATH = getInlineCommentBufferPath();
 const CLASSIFY_ENABLED = process.env.CLASSIFY_INLINE_COMMENTS !== "false";
 
 if (!REPO_OWNER || !REPO_NAME || !PR_NUMBER) {
@@ -109,6 +114,8 @@ server.tool(
       }
 
       if (CLASSIFY_ENABLED && confirmed !== true) {
+        // The per-run directory does not exist until the first buffered call.
+        mkdirSync(dirname(BUFFER_PATH), { recursive: true });
         appendFileSync(
           BUFFER_PATH,
           JSON.stringify({

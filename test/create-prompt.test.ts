@@ -1,15 +1,21 @@
 #!/usr/bin/env bun
 
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, spyOn } from "bun:test";
+import * as core from "@actions/core";
+import { readFile, rm } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import * as createPromptModule from "../src/create-prompt";
 import {
+  createPrompt,
   generatePrompt,
   getEventTypeAndContext,
-  buildAllowedToolsString,
-  buildDisallowedToolsString,
   prepareContext,
 } from "../src/create-prompt";
 import type { PreparedContext } from "../src/create-prompt";
-import { createMockContext } from "./mockContext";
+import type { FetchDataResult } from "../src/github/data/fetcher";
+import type { ParsedGitHubContext } from "../src/github/context";
+import { createMockContext, mockIssueCommentContext } from "./mockContext";
 
 beforeAll(() => {
   process.env.GITHUB_ACTION_PATH = "/test/action/path";
@@ -1068,246 +1074,6 @@ describe("getEventTypeAndContext", () => {
   });
 });
 
-describe("buildAllowedToolsString", () => {
-  test("should return correct tools for regular events (default no signing)", async () => {
-    const result = buildAllowedToolsString();
-
-    // The base tools should be in the result
-    // Edit/MultiEdit/Write are NOT in allowedTools — acceptEdits permission mode handles them
-    expect(result).not.toContain("Edit");
-    expect(result).not.toContain("Write");
-    expect(result).toContain("Glob");
-    expect(result).toContain("Grep");
-    expect(result).toContain("LS");
-    expect(result).toContain("Read");
-
-    // Default is no commit signing, so should have specific Bash git commands
-    expect(result).toContain("Bash(git add:*)");
-    expect(result).toContain("Bash(git commit:*)");
-    expect(result).toContain("scripts/git-push.sh:*)");
-    expect(result).toContain("mcp__github_comment__update_claude_comment");
-
-    // Should not have commit signing tools
-    expect(result).not.toContain("mcp__github_file_ops__commit_files");
-    expect(result).not.toContain("mcp__github_file_ops__delete_files");
-  });
-
-  test("should return correct tools with default parameters", async () => {
-    const result = buildAllowedToolsString([], false, false);
-
-    // The base tools should be in the result
-    expect(result).not.toContain("Edit");
-    expect(result).toContain("Glob");
-    expect(result).toContain("Grep");
-    expect(result).toContain("LS");
-    expect(result).toContain("Read");
-    expect(result).not.toContain("Write");
-
-    // Should have specific Bash git commands for non-signing mode
-    expect(result).toContain("Bash(git add:*)");
-    expect(result).toContain("Bash(git commit:*)");
-    expect(result).toContain("mcp__github_comment__update_claude_comment");
-
-    // Should not have commit signing tools
-    expect(result).not.toContain("mcp__github_file_ops__commit_files");
-    expect(result).not.toContain("mcp__github_file_ops__delete_files");
-  });
-
-  test("should append custom tools when provided", async () => {
-    const customTools = ["Tool1", "Tool2", "Tool3"];
-    const result = buildAllowedToolsString(customTools);
-
-    // Base tools should be present
-    expect(result).toContain("Read");
-    expect(result).toContain("Glob");
-
-    // Custom tools should be appended
-    expect(result).toContain("Tool1");
-    expect(result).toContain("Tool2");
-    expect(result).toContain("Tool3");
-
-    // Verify format with comma separation
-    const basePlusCustom = result.split(",");
-    expect(basePlusCustom.length).toBeGreaterThan(10); // At least the base tools plus custom
-    expect(basePlusCustom).toContain("Tool1");
-    expect(basePlusCustom).toContain("Tool2");
-    expect(basePlusCustom).toContain("Tool3");
-  });
-
-  test("should include GitHub Actions tools when includeActionsTools is true", async () => {
-    const result = buildAllowedToolsString([], true);
-
-    // Base tools should be present
-    expect(result).toContain("Read");
-    expect(result).toContain("Glob");
-
-    // GitHub Actions tools should be included
-    expect(result).toContain("mcp__github_ci__get_ci_status");
-    expect(result).toContain("mcp__github_ci__get_workflow_run_details");
-    expect(result).toContain("mcp__github_ci__download_job_log");
-  });
-
-  test("should include both custom and Actions tools when both provided", async () => {
-    const customTools = ["Tool1", "Tool2"];
-    const result = buildAllowedToolsString(customTools, true);
-
-    // Base tools should be present
-    expect(result).toContain("Read");
-
-    // Custom tools should be included
-    expect(result).toContain("Tool1");
-    expect(result).toContain("Tool2");
-
-    // GitHub Actions tools should be included
-    expect(result).toContain("mcp__github_ci__get_ci_status");
-    expect(result).toContain("mcp__github_ci__get_workflow_run_details");
-    expect(result).toContain("mcp__github_ci__download_job_log");
-  });
-
-  test("should include commit signing tools when useCommitSigning is true", async () => {
-    const result = buildAllowedToolsString([], false, true);
-
-    // Base tools should be present
-    expect(result).not.toContain("Edit");
-    expect(result).toContain("Glob");
-    expect(result).toContain("Grep");
-    expect(result).toContain("LS");
-    expect(result).toContain("Read");
-    expect(result).not.toContain("Write");
-
-    // Commit signing tools should be included
-    expect(result).toContain("mcp__github_file_ops__commit_files");
-    expect(result).toContain("mcp__github_file_ops__delete_files");
-    // Comment tool should always be from github_comment server
-    expect(result).toContain("mcp__github_comment__update_claude_comment");
-
-    // Bash should NOT be included when using commit signing (except in comment tool name)
-    expect(result).not.toContain("Bash(");
-  });
-
-  test("should include specific Bash git commands when useCommitSigning is false", async () => {
-    const result = buildAllowedToolsString([], false, false);
-
-    // Base tools should be present
-    expect(result).not.toContain("Edit");
-    expect(result).toContain("Glob");
-    expect(result).toContain("Grep");
-    expect(result).toContain("LS");
-    expect(result).toContain("Read");
-    expect(result).not.toContain("Write");
-
-    // Specific Bash git commands should be included
-    expect(result).toContain("Bash(git add:*)");
-    expect(result).toContain("Bash(git commit:*)");
-    expect(result).toContain("scripts/git-push.sh:*)");
-    expect(result).toContain("Bash(git rm:*)");
-
-    // Comment tool from minimal server should be included
-    expect(result).toContain("mcp__github_comment__update_claude_comment");
-
-    // Commit signing tools should NOT be included
-    expect(result).not.toContain("mcp__github_file_ops__commit_files");
-    expect(result).not.toContain("mcp__github_file_ops__delete_files");
-  });
-
-  test("should handle all combinations of options", async () => {
-    const customTools = ["CustomTool1", "CustomTool2"];
-    const result = buildAllowedToolsString(customTools, true, false);
-
-    // Base tools should be present
-    expect(result).toContain("Read");
-    expect(result).toContain("Bash(git add:*)");
-
-    // Custom tools should be included
-    expect(result).toContain("CustomTool1");
-    expect(result).toContain("CustomTool2");
-
-    // GitHub Actions tools should be included
-    expect(result).toContain("mcp__github_ci__get_ci_status");
-
-    // Comment tool from minimal server should be included
-    expect(result).toContain("mcp__github_comment__update_claude_comment");
-
-    // Commit signing tools should NOT be included
-    expect(result).not.toContain("mcp__github_file_ops__commit_files");
-  });
-});
-
-describe("buildDisallowedToolsString", () => {
-  test("should return base disallowed tools when no custom tools provided", async () => {
-    const result = buildDisallowedToolsString();
-
-    // The base disallowed tools should be in the result
-    expect(result).toContain("WebSearch");
-    expect(result).toContain("WebFetch");
-  });
-
-  test("should append custom disallowed tools when provided", async () => {
-    const customDisallowedTools = ["BadTool1", "BadTool2"];
-    const result = buildDisallowedToolsString(customDisallowedTools);
-
-    // Base disallowed tools should be present
-    expect(result).toContain("WebSearch");
-
-    // Custom disallowed tools should be appended
-    expect(result).toContain("BadTool1");
-    expect(result).toContain("BadTool2");
-
-    // Verify format with comma separation
-    const parts = result.split(",");
-    expect(parts).toContain("WebSearch");
-    expect(parts).toContain("BadTool1");
-    expect(parts).toContain("BadTool2");
-  });
-
-  test("should remove hardcoded disallowed tools if they are in allowed tools", async () => {
-    const customDisallowedTools = ["BadTool1", "BadTool2"];
-    const allowedTools = ["WebSearch", "SomeOtherTool"];
-    const result = buildDisallowedToolsString(
-      customDisallowedTools,
-      allowedTools,
-    );
-
-    // WebSearch should be removed from disallowed since it's in allowed
-    expect(result).not.toContain("WebSearch");
-
-    // WebFetch should still be disallowed since it's not in allowed
-    expect(result).toContain("WebFetch");
-
-    // Custom disallowed tools should still be present
-    expect(result).toContain("BadTool1");
-    expect(result).toContain("BadTool2");
-  });
-
-  test("should remove all hardcoded disallowed tools if they are all in allowed tools", async () => {
-    const allowedTools = ["WebSearch", "WebFetch", "SomeOtherTool"];
-    const result = buildDisallowedToolsString(undefined, allowedTools);
-
-    // Both hardcoded disallowed tools should be removed
-    expect(result).not.toContain("WebSearch");
-    expect(result).not.toContain("WebFetch");
-
-    // Result should be empty since no custom disallowed tools provided
-    expect(result).toBe("");
-  });
-
-  test("should handle custom disallowed tools when all hardcoded tools are overridden", async () => {
-    const customDisallowedTools = ["BadTool1", "BadTool2"];
-    const allowedTools = ["WebSearch", "WebFetch"];
-    const result = buildDisallowedToolsString(
-      customDisallowedTools,
-      allowedTools,
-    );
-
-    // Hardcoded tools should be removed
-    expect(result).not.toContain("WebSearch");
-    expect(result).not.toContain("WebFetch");
-
-    // Only custom disallowed tools should remain
-    expect(result).toBe("BadTool1,BadTool2");
-  });
-});
-
 describe("prepareContext validation errors", () => {
   const commentId = "12345";
 
@@ -1385,5 +1151,123 @@ describe("prepareContext validation errors", () => {
     expect(() => prepareContext(context, commentId)).toThrow(
       "CLAUDE_BRANCH is required for issue_comment event",
     );
+  });
+});
+
+describe("createPrompt", () => {
+  const promptRoot = join(tmpdir(), `create-prompt-test-${process.pid}`);
+  let previousRunnerTemp: string | undefined;
+
+  const issueGitHubData: FetchDataResult = {
+    contextData: {
+      title: "Logging configuration",
+      body: "How do I configure logging?",
+      author: { login: "contributor-user" },
+      createdAt: "2024-01-15T10:00:00Z",
+      state: "OPEN",
+      labels: { nodes: [] },
+      comments: { nodes: [] },
+    },
+    comments: [],
+    changedFiles: [],
+    changedFilesWithSHA: [],
+    reviewData: null,
+    imageUrlMap: new Map<string, string>(),
+  };
+
+  beforeAll(() => {
+    previousRunnerTemp = process.env.RUNNER_TEMP;
+    process.env.RUNNER_TEMP = promptRoot;
+  });
+
+  afterAll(async () => {
+    if (previousRunnerTemp === undefined) {
+      delete process.env.RUNNER_TEMP;
+    } else {
+      process.env.RUNNER_TEMP = previousRunnerTemp;
+    }
+    await rm(promptRoot, { recursive: true, force: true });
+  });
+
+  test("writes the prompt and user request files without exporting tool env vars", async () => {
+    const exportSpy = spyOn(core, "exportVariable").mockImplementation(
+      () => {},
+    );
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    delete process.env.ALLOWED_TOOLS;
+    delete process.env.DISALLOWED_TOOLS;
+
+    try {
+      await createPrompt(
+        12345,
+        "main",
+        "claude/issue-55-20240115-1230",
+        issueGitHubData,
+        mockIssueCommentContext,
+      );
+
+      const prompt = await readFile(
+        join(promptRoot, "claude-prompts", "claude-prompt.txt"),
+        "utf-8",
+      );
+      expect(prompt).toContain("You are Claude, an AI assistant");
+      expect(prompt).toContain("<claude_comment_id>12345</claude_comment_id>");
+
+      const userRequest = await readFile(
+        join(promptRoot, "claude-prompts", "claude-user-request.txt"),
+        "utf-8",
+      );
+      expect(userRequest).toContain("configure the logging system");
+
+      // Nothing reads ALLOWED_TOOLS / DISALLOWED_TOOLS: the live allow-list is
+      // built into claudeArgs by src/modes/tag/index.ts.
+      expect(exportSpy).not.toHaveBeenCalled();
+      expect(process.env.ALLOWED_TOOLS).toBeUndefined();
+      expect(process.env.DISALLOWED_TOOLS).toBeUndefined();
+    } finally {
+      exportSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  test("no longer exports the dead tool-string builders", () => {
+    expect("buildAllowedToolsString" in createPromptModule).toBe(false);
+    expect("buildDisallowedToolsString" in createPromptModule).toBe(false);
+  });
+
+  test("throws a prepare error for the prompt step instead of exiting the process", async () => {
+    const originalExit = process.exit;
+    const exitCalls: unknown[] = [];
+    process.exit = ((code?: number) => {
+      exitCalls.push(code);
+      throw new Error(`process.exit(${code}) called`);
+    }) as typeof process.exit;
+    const setFailedSpy = spyOn(core, "setFailed").mockImplementation(() => {});
+    const badContext = createMockContext({
+      eventName:
+        "deployment_status" as unknown as ParsedGitHubContext["eventName"],
+    });
+
+    let thrown: unknown;
+    try {
+      await createPrompt(1, undefined, undefined, issueGitHubData, badContext);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      process.exit = originalExit;
+      setFailedSpy.mockRestore();
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    const error = thrown as Error & { step?: string };
+    expect(error.step).toBe("prompt");
+    expect(error.message).toContain(
+      "Unsupported event type: deployment_status",
+    );
+    expect((error.cause as Error | undefined)?.message).toBe(
+      "Unsupported event type: deployment_status",
+    );
+    expect(exitCalls).toEqual([]);
+    expect(setFailedSpy).not.toHaveBeenCalled();
   });
 });

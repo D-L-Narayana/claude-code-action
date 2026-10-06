@@ -1,4 +1,12 @@
-import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  describe,
+  expect,
+  test,
+  beforeEach,
+  afterEach,
+  mock,
+  spyOn,
+} from "bun:test";
 import * as core from "@actions/core";
 import {
   setupGitHubToken,
@@ -160,5 +168,66 @@ describe("setupGitHubToken", () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(3);
     expect(warningSpy).not.toHaveBeenCalled();
+  });
+
+  describe("token exchange timeout", () => {
+    // A hung socket keeps the exchange pending forever and defeats
+    // retryWithBackoff, which only sees settled promises. This fake fetch
+    // never settles on its own: it rejects only once the abort signal it was
+    // handed fires, so the exchange has to wire up a real timeout to pass.
+    // AbortSignal.timeout does not go through the mocked global setTimeout.
+    const createHungFetch = () =>
+      mock(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            if (!signal) {
+              reject(new Error("fetch was called without an abort signal"));
+              return;
+            }
+            if (signal.aborted) {
+              reject(signal.reason);
+              return;
+            }
+            signal.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+          }),
+      );
+
+    test("fails a hung token exchange with a timeout error and retries before giving up", async () => {
+      const hungFetch = createHungFetch();
+
+      await expect(
+        setupGitHubToken({ fetchFn: hungFetch, timeoutMs: 20 }),
+      ).rejects.toThrow("timed out after 20 ms");
+
+      expect(hungFetch).toHaveBeenCalledTimes(3);
+      expect(hungFetch.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // A timeout is an ordinary retryable failure, not a workflow
+      // validation skip, so no skip warning may be emitted.
+      expect(warningSpy).not.toHaveBeenCalled();
+    });
+
+    test("uses the injected fetch implementation for a successful exchange", async () => {
+      const okFetch = mock(
+        async (_input: string | URL | Request, init?: RequestInit) => {
+          expect(init?.signal).toBeInstanceOf(AbortSignal);
+          return new Response(JSON.stringify({ token: "injected-token" }), {
+            status: 200,
+            statusText: "OK",
+          });
+        },
+      );
+
+      await expect(setupGitHubToken({ fetchFn: okFetch })).resolves.toBe(
+        "injected-token",
+      );
+
+      expect(okFetch).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(setSecretSpy).toHaveBeenCalledWith("injected-token");
+    });
   });
 });

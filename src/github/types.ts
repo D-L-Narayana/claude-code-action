@@ -13,6 +13,21 @@ export type GitHubAuthor = {
   __typename?: string;
 };
 
+// Cursor metadata on a GraphQL connection. GitHub returns connections
+// oldest-first in pages of at most 100 nodes, so without following the cursor
+// the newest comments/reviews/files on a long thread would be the ones lost.
+// It is optional because a response from a query that did not ask for it
+// carries none; the fetcher treats such a connection as complete.
+export type GitHubPageInfo = {
+  hasNextPage: boolean;
+  endCursor: string | null;
+};
+
+export type GitHubConnection<TNode> = {
+  nodes: TNode[];
+  pageInfo?: GitHubPageInfo;
+};
+
 export type GitHubComment = {
   id: string;
   databaseId: string;
@@ -55,9 +70,7 @@ export type GitHubReview = {
   submittedAt: string;
   updatedAt?: string;
   lastEditedAt?: string;
-  comments: {
-    nodes: GitHubReviewComment[];
-  };
+  comments: GitHubConnection<GitHubReviewComment>;
 };
 
 export type GitHubPullRequest = {
@@ -95,15 +108,9 @@ export type GitHubPullRequest = {
   // large for GitHub to compute (very large PRs). `changedFiles` is also
   // misreported as 0 in that case, so the null must be guarded and treated as
   // "file list unavailable" rather than "no files changed".
-  files: {
-    nodes: GitHubFile[];
-  } | null;
-  comments: {
-    nodes: GitHubComment[];
-  };
-  reviews: {
-    nodes: GitHubReview[];
-  };
+  files: GitHubConnection<GitHubFile> | null;
+  comments: GitHubConnection<GitHubComment>;
+  reviews: GitHubConnection<GitHubReview>;
 };
 
 export type GitHubIssue = {
@@ -119,9 +126,7 @@ export type GitHubIssue = {
       name: string;
     }>;
   };
-  comments: {
-    nodes: GitHubComment[];
-  };
+  comments: GitHubConnection<GitHubComment>;
 };
 
 export type PullRequestQueryResponse = {
@@ -134,4 +139,35 @@ export type IssueQueryResponse = {
   repository: {
     issue: GitHubIssue;
   };
+};
+
+// Responses of the follow-up queries that fetch one further page of a single
+// connection (see `*_PAGE_QUERY` in `api/queries/github.ts`). The parent
+// entity is null when it was deleted between the initial and follow-up calls.
+export type PullRequestCommentsPageResponse = {
+  repository: {
+    pullRequest: { comments: GitHubConnection<GitHubComment> } | null;
+  };
+};
+
+export type PullRequestReviewsPageResponse = {
+  repository: {
+    pullRequest: { reviews: GitHubConnection<GitHubReview> } | null;
+  };
+};
+
+export type PullRequestFilesPageResponse = {
+  repository: {
+    pullRequest: { files: GitHubConnection<GitHubFile> | null } | null;
+  };
+};
+
+export type IssueCommentsPageResponse = {
+  repository: {
+    issue: { comments: GitHubConnection<GitHubComment> } | null;
+  };
+};
+
+export type ReviewCommentsPageResponse = {
+  node: { comments: GitHubConnection<GitHubReviewComment> } | null;
 };

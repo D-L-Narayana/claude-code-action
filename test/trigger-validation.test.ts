@@ -1,4 +1,5 @@
 import {
+  buildTriggerRegex,
   checkContainsTrigger,
   escapeRegExp,
 } from "../src/github/validation/trigger";
@@ -16,6 +17,7 @@ import type {
   IssueCommentEvent,
   IssuesAssignedEvent,
   IssuesEvent,
+  IssuesLabeledEvent,
   PullRequestEvent,
   PullRequestReviewEvent,
 } from "@octokit/webhooks-types";
@@ -126,7 +128,7 @@ describe("checkContainsTrigger", () => {
         payload: {
           ...mockIssueLabeledContext.payload,
           label: {
-            ...(mockIssueLabeledContext.payload as any).label,
+            ...(mockIssueLabeledContext.payload as IssuesLabeledEvent).label,
             name: "bug",
           },
         },
@@ -140,7 +142,7 @@ describe("checkContainsTrigger", () => {
         payload: {
           ...mockIssueLabeledContext.payload,
           label: {
-            ...(mockIssueLabeledContext.payload as any).label,
+            ...(mockIssueLabeledContext.payload as IssuesLabeledEvent).label,
             name: "Claude-Task",
           },
         },
@@ -486,5 +488,54 @@ describe("escapeRegExp", () => {
   it("should handle mixed characters", () => {
     expect(escapeRegExp("hello.world")).toBe("hello\\.world");
     expect(escapeRegExp("test[123]")).toBe("test\\[123\\]");
+  });
+});
+
+describe("buildTriggerRegex", () => {
+  it("matches the phrase on its own", () => {
+    expect(buildTriggerRegex("@claude").test("@claude")).toBe(true);
+  });
+
+  it("matches the phrase followed by whitespace or punctuation", () => {
+    const regex = buildTriggerRegex("@claude");
+    expect(regex.test("hi @claude!")).toBe(true);
+    expect(regex.test("@claude: x")).toBe(true);
+    expect(regex.test("@claude, please")).toBe(true);
+    expect(regex.test("@claude fix this")).toBe(true);
+  });
+
+  it("does not match when the phrase is a prefix of a longer token", () => {
+    const regex = buildTriggerRegex("@claude");
+    expect(regex.test("@claude-bot")).toBe(false);
+    expect(regex.test("@claudette")).toBe(false);
+  });
+
+  it("does not match when the phrase is embedded in an email address", () => {
+    expect(buildTriggerRegex("@claude").test("email@claude.ai")).toBe(false);
+  });
+
+  it("requires whitespace or start-of-text before the phrase", () => {
+    const regex = buildTriggerRegex("@claude");
+    expect(regex.test("foo@claude")).toBe(false);
+    expect(regex.test("\n@claude")).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    const regex = buildTriggerRegex("@claude");
+    expect(regex.test("@CLAUDE fix")).toBe(true);
+    expect(regex.test("@Claude")).toBe(true);
+  });
+
+  it("escapes regex metacharacters in the phrase", () => {
+    const regex = buildTriggerRegex("/claude.bot");
+    expect(regex.test("/claude.bot help")).toBe(true);
+    expect(regex.test("/claudeXbot help")).toBe(false);
+  });
+
+  it("uses only the case-insensitive flag so repeated test() calls are stateless", () => {
+    const regex = buildTriggerRegex("@claude");
+    expect(regex.flags).toBe("i");
+    expect(regex.test("@claude")).toBe(true);
+    expect(regex.test("@claude")).toBe(true);
   });
 });

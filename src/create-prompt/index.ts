@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import * as core from "@actions/core";
 import { writeFile, mkdir, rm } from "fs/promises";
 import type { FetchDataResult } from "../github/data/fetcher";
 import {
@@ -21,85 +20,20 @@ import type { ParsedGitHubContext } from "../github/context";
 import type { CommonFields, PreparedContext, EventData } from "./types";
 import { GITHUB_SERVER_URL } from "../github/api/config";
 import { extractUserRequest } from "../utils/extract-user-request";
+import { PrepareError } from "../utils/prepare-error";
+import {
+  PROMPT_BUDGET_ENV_VAR,
+  resolvePromptBudget,
+  truncateText,
+  type PromptBudget,
+} from "./budget";
 export type { CommonFields, PreparedContext } from "./types";
+export type { PromptBudget } from "./budget";
 
 const GIT_PUSH_WRAPPER = `${process.env.GITHUB_ACTION_PATH}/scripts/git-push.sh`;
 
 /** Filename for the user request file, read by the SDK runner */
 const USER_REQUEST_FILENAME = "claude-user-request.txt";
-
-// Tag mode defaults - these tools are needed for tag mode to function.
-// Edit/MultiEdit/Write are intentionally omitted: acceptEdits permission mode
-// auto-allows file edits inside $GITHUB_WORKSPACE and denies writes outside it.
-const BASE_ALLOWED_TOOLS = ["Glob", "Grep", "LS", "Read"];
-
-export function buildAllowedToolsString(
-  customAllowedTools?: string[],
-  includeActionsTools: boolean = false,
-  useCommitSigning: boolean = false,
-): string {
-  // Tag mode needs these tools to function properly
-  let baseTools = [...BASE_ALLOWED_TOOLS];
-
-  // Always include the comment update tool for tag mode
-  baseTools.push("mcp__github_comment__update_claude_comment");
-
-  // Add commit signing tools if enabled
-  if (useCommitSigning) {
-    baseTools.push(
-      "mcp__github_file_ops__commit_files",
-      "mcp__github_file_ops__delete_files",
-    );
-  } else {
-    // When not using commit signing, add specific Bash git commands
-    baseTools.push(
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      `Bash(${GIT_PUSH_WRAPPER}:*)`,
-      "Bash(git rm:*)",
-    );
-  }
-
-  // Add GitHub Actions MCP tools if enabled
-  if (includeActionsTools) {
-    baseTools.push(
-      "mcp__github_ci__get_ci_status",
-      "mcp__github_ci__get_workflow_run_details",
-      "mcp__github_ci__download_job_log",
-    );
-  }
-
-  let allAllowedTools = baseTools.join(",");
-  if (customAllowedTools && customAllowedTools.length > 0) {
-    allAllowedTools = `${allAllowedTools},${customAllowedTools.join(",")}`;
-  }
-  return allAllowedTools;
-}
-
-export function buildDisallowedToolsString(
-  customDisallowedTools?: string[],
-  allowedTools?: string[],
-): string {
-  // Tag mode: Disable WebSearch and WebFetch by default for security
-  let disallowedTools = ["WebSearch", "WebFetch"];
-
-  // If user has explicitly allowed some default disallowed tools, remove them
-  if (allowedTools && allowedTools.length > 0) {
-    disallowedTools = disallowedTools.filter(
-      (tool) => !allowedTools.includes(tool),
-    );
-  }
-
-  let allDisallowedTools = disallowedTools.join(",");
-  if (customDisallowedTools && customDisallowedTools.length > 0) {
-    if (allDisallowedTools) {
-      allDisallowedTools = `${allDisallowedTools},${customDisallowedTools.join(",")}`;
-    } else {
-      allDisallowedTools = customDisallowedTools.join(",");
-    }
-  }
-  return allDisallowedTools;
-}
 
 export function prepareContext(
   context: ParsedGitHubContext,
@@ -459,35 +393,72 @@ function getCommitInstructions(
   }
 }
 
+/**
+ * Joins the GitHub-derived context block with the instruction tail so the
+ * whole prompt stays within `maxTotalChars`.
+ *
+ * Only the context block is ever cut. The tail (metadata, the trigger comment
+ * and the task instructions) is what makes the prompt actionable: a prompt
+ * missing its instructions is useless, whereas one missing some old context is
+ * merely less informed. Every piece of the context block was sanitized before
+ * it got here, so cutting it cannot reopen a hidden-content channel.
+ */
+function fitPromptToBudget(
+  contextBlock: string,
+  instructions: string,
+  maxTotalChars: number,
+): string {
+  if (instructions.length > maxTotalChars) {
+    console.warn(
+      `The prompt instructions alone are ${instructions.length} chars, above the ${maxTotalChars}-char prompt budget; raise ${PROMPT_BUDGET_ENV_VAR}`,
+    );
+  }
+  const contextBudget = Math.max(0, maxTotalChars - instructions.length);
+  const fittedContext = truncateText(contextBlock, contextBudget, "context");
+  if (fittedContext.length < contextBlock.length) {
+    console.warn(
+      `Prompt context truncated by ${contextBlock.length - fittedContext.length} chars to stay within the ${maxTotalChars}-char prompt budget (${PROMPT_BUDGET_ENV_VAR} adjusts it)`,
+    );
+  }
+  return fittedContext + instructions;
+}
+
 export function generatePrompt(
   context: PreparedContext,
   githubData: FetchDataResult,
   useCommitSigning: boolean,
   modeName: "tag" | "agent",
+  budget: PromptBudget = resolvePromptBudget(),
 ): string {
   if (modeName === "agent") {
     return context.prompt || `Repository: ${context.repository}`;
   }
 
-  // Tag mode
-  const defaultPrompt = generateDefaultPrompt(
-    context,
-    githubData,
-    useCommitSigning,
-  );
-
-  if (context.githubContext?.inputs?.prompt) {
-    return (
-      defaultPrompt +
-      `
+  // Tag mode. Custom instructions are workflow configuration rather than
+  // GitHub content, so they are appended verbatim; their length is reserved
+  // out of the total so the context cap accounts for them.
+  const customInstructions = context.githubContext?.inputs?.prompt
+    ? `
 
 <custom_instructions>
 ${context.githubContext.inputs.prompt}
 </custom_instructions>`
-    );
-  }
+    : "";
 
-  return defaultPrompt;
+  const defaultPrompt = generateDefaultPrompt(
+    context,
+    githubData,
+    useCommitSigning,
+    {
+      ...budget,
+      maxTotalChars: Math.max(
+        0,
+        budget.maxTotalChars - customInstructions.length,
+      ),
+    },
+  );
+
+  return defaultPrompt + customInstructions;
 }
 
 /**
@@ -498,6 +469,7 @@ function generateSimplePrompt(
   context: PreparedContext,
   githubData: FetchDataResult,
   useCommitSigning: boolean = false,
+  budget: PromptBudget = resolvePromptBudget(),
 ): string {
   const {
     contextData,
@@ -511,12 +483,12 @@ function generateSimplePrompt(
   const { triggerContext } = getEventTypeAndContext(context);
 
   const formattedContext = formatContext(contextData, eventData.isPR);
-  const formattedComments = formatComments(comments, imageUrlMap);
+  const formattedComments = formatComments(comments, imageUrlMap, budget);
   const formattedReviewComments = eventData.isPR
-    ? formatReviewComments(reviewData, imageUrlMap)
+    ? formatReviewComments(reviewData, imageUrlMap, budget)
     : "";
   const formattedChangedFiles = eventData.isPR
-    ? formatChangedFilesWithSHA(changedFilesWithSHA)
+    ? formatChangedFilesWithSHA(changedFilesWithSHA, budget.maxChangedFiles)
     : "";
 
   const hasImages = imageUrlMap && imageUrlMap.size > 0;
@@ -527,13 +499,13 @@ Images from comments have been saved to disk. Paths are in the formatted content
     : "";
 
   const formattedBody = contextData?.body
-    ? formatBody(contextData.body, imageUrlMap)
+    ? formatBody(contextData.body, imageUrlMap, budget.maxBodyChars)
     : "No description provided";
 
   const entityType = eventData.isPR ? "pull request" : "issue";
   const jobUrl = `${GITHUB_SERVER_URL}/${context.repository}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
-  let promptContent = `You were tagged on a GitHub ${entityType} via "${context.triggerPhrase}". Read the request and decide how to help.
+  const contextBlock = `You were tagged on a GitHub ${entityType} via "${context.triggerPhrase}". Read the request and decide how to help.
 
 <context>
 ${formattedContext}
@@ -557,7 +529,9 @@ ${formattedReviewComments || "No review comments"}
 ${formattedChangedFiles || "No files changed"}
 </changed_files>`
     : ""
-}${imagesInfo}
+}${imagesInfo}`;
+
+  const instructions = `
 
 <metadata>
 repository: ${context.repository}
@@ -611,7 +585,7 @@ Always include at the bottom:
 - Job link: [View job run](${jobUrl})
 - Follow the repo's CLAUDE.md file for project-specific guidelines`;
 
-  return promptContent;
+  return fitPromptToBudget(contextBlock, instructions, budget.maxTotalChars);
 }
 
 /**
@@ -622,10 +596,11 @@ export function generateDefaultPrompt(
   context: PreparedContext,
   githubData: FetchDataResult,
   useCommitSigning: boolean = false,
+  budget: PromptBudget = resolvePromptBudget(),
 ): string {
   // Use simplified prompt if opted in
   if (process.env.USE_SIMPLE_PROMPT === "true") {
-    return generateSimplePrompt(context, githubData, useCommitSigning);
+    return generateSimplePrompt(context, githubData, useCommitSigning, budget);
   }
   const {
     contextData,
@@ -639,12 +614,12 @@ export function generateDefaultPrompt(
   const { eventType, triggerContext } = getEventTypeAndContext(context);
 
   const formattedContext = formatContext(contextData, eventData.isPR);
-  const formattedComments = formatComments(comments, imageUrlMap);
+  const formattedComments = formatComments(comments, imageUrlMap, budget);
   const formattedReviewComments = eventData.isPR
-    ? formatReviewComments(reviewData, imageUrlMap)
+    ? formatReviewComments(reviewData, imageUrlMap, budget)
     : "";
   const formattedChangedFiles = eventData.isPR
-    ? formatChangedFilesWithSHA(changedFilesWithSHA)
+    ? formatChangedFilesWithSHA(changedFilesWithSHA, budget.maxChangedFiles)
     : "";
 
   // Check if any images were downloaded
@@ -658,10 +633,10 @@ Images have been downloaded from GitHub comments and saved to disk. Their file p
     : "";
 
   const formattedBody = contextData?.body
-    ? formatBody(contextData.body, imageUrlMap)
+    ? formatBody(contextData.body, imageUrlMap, budget.maxBodyChars)
     : "No description provided";
 
-  let promptContent = `You are Claude, an AI assistant designed to help with GitHub issues and pull requests. Think carefully as you analyze the context and respond appropriately. Here's the context for your current task:
+  const contextBlock = `You are Claude, an AI assistant designed to help with GitHub issues and pull requests. Think carefully as you analyze the context and respond appropriately. Here's the context for your current task:
 
 <formatted_context>
 ${formattedContext}
@@ -689,7 +664,9 @@ ${
 ${formattedChangedFiles || "No files changed"}
 </changed_files>`
     : ""
-}${imagesInfo}
+}${imagesInfo}`;
+
+  const instructions = `
 
 <event_type>${eventType}</event_type>
 <is_pr>${eventData.isPR ? "true" : "false"}</is_pr>
@@ -874,7 +851,7 @@ e. Propose a high-level plan of action, including any repo setup steps and linti
 f. If you are unable to complete certain steps, such as running a linter or test suite, particularly due to missing permissions, explain this in your comment so that the user can update your \`--allowedTools\`.
 `;
 
-  return promptContent;
+  return fitPromptToBudget(contextBlock, instructions, budget.maxTotalChars);
 }
 
 /**
@@ -980,23 +957,15 @@ export async function createPrompt(
       console.log(userRequest);
       console.log("========================");
     }
-
-    // NOTE: these env var exports are dead — nothing reads ALLOWED_TOOLS / DISALLOWED_TOOLS.
-    // The live path is modes/tag/index.ts which builds --allowedTools into claudeArgs directly.
-    // Kept only so the H1 report's pointed-to file stays in sync with the live fix.
-    const hasActionsReadPermission = false;
-
-    const allAllowedTools = buildAllowedToolsString(
-      [],
-      hasActionsReadPermission,
-      context.inputs.useCommitSigning,
-    );
-    const allDisallowedTools = buildDisallowedToolsString([], []);
-
-    core.exportVariable("ALLOWED_TOOLS", allAllowedTools);
-    core.exportVariable("DISALLOWED_TOOLS", allDisallowedTools);
   } catch (error) {
-    core.setFailed(`Create prompt failed with error: ${error}`);
-    process.exit(1);
+    // Throwing (rather than exiting the process) lets run.ts attribute the
+    // failure to the prepare phase and still update the tracking comment.
+    if (error instanceof PrepareError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new PrepareError("prompt", `Create prompt failed: ${message}`, {
+      cause: error,
+    });
   }
 }

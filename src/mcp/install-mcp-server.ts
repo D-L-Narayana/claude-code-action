@@ -4,6 +4,7 @@ import type { GitHubContext } from "../github/context";
 import { isEntityContext } from "../github/context";
 import { Octokit } from "@octokit/rest";
 import type { AutoDetectedMode } from "../modes/detector";
+import { PrepareError } from "../utils/prepare-error";
 
 type PrepareConfigParams = {
   githubToken: string;
@@ -141,7 +142,10 @@ export async function prepareMcpConfig(
           BASE_BRANCH: baseBranch,
           REPO_DIR: process.env.GITHUB_WORKSPACE || process.cwd(),
           GITHUB_EVENT_NAME: process.env.GITHUB_EVENT_NAME || "",
-          IS_PR: process.env.IS_PR || "false",
+          // Derived from the parsed context: nothing in the action exports
+          // IS_PR to the environment, so reading process.env here was always
+          // "false".
+          IS_PR: isEntityContext(context) && context.isPR ? "true" : "false",
           GITHUB_API_URL: GITHUB_API_URL,
         },
       };
@@ -165,6 +169,9 @@ export async function prepareMcpConfig(
           CLASSIFY_INLINE_COMMENTS: context.inputs.classifyInlineComments
             ? "true"
             : "false",
+          // The server buffers comments in a per-run file derived from these.
+          RUNNER_TEMP: process.env.RUNNER_TEMP || "/tmp",
+          GITHUB_RUN_ID: process.env.GITHUB_RUN_ID || "",
         },
       };
     }
@@ -234,7 +241,12 @@ export async function prepareMcpConfig(
     // User's config will be passed as separate --mcp-config flags
     return JSON.stringify(baseMcpConfig, null, 2);
   } catch (error) {
-    core.setFailed(`Install MCP server failed with error: ${error}`);
-    process.exit(1);
+    // Throw instead of exiting so run.ts reaches its finally block and can
+    // update the tracking comment and set outputs.
+    throw new PrepareError(
+      "mcp-config",
+      `Install MCP server failed with error: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
 }

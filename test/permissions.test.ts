@@ -303,6 +303,85 @@ describe("checkWritePermissions", () => {
         "Actor is a GitHub App: test-bot[bot]",
       );
     });
+
+    // GitHub logins are case-insensitive: "Alice" and "alice" are the same
+    // account, so a configured entry must match regardless of how either side
+    // is capitalised. The collaborator mock returns "read" so the bypass is
+    // the only way for these actors to pass.
+    test("should match allowed_non_write_users case-insensitively", async () => {
+      const mockOctokit = createMockOctokit("read");
+      const context = createContext();
+      context.actor = "alice";
+
+      const result = await checkWritePermissions(
+        mockOctokit,
+        context,
+        "Alice",
+        true,
+      );
+
+      expect(result).toBe(true);
+      expect(coreWarningSpy).toHaveBeenCalledWith(
+        "⚠️ SECURITY WARNING: Bypassing write permission check for alice due to allowed_non_write_users configuration. This should only be used for workflows with very limited permissions.",
+      );
+    });
+
+    test("should match a mixed-case actor against a lowercase allowed_non_write_users entry", async () => {
+      const mockOctokit = createMockOctokit("read");
+      const context = createContext();
+      context.actor = "Alice";
+
+      const result = await checkWritePermissions(
+        mockOctokit,
+        context,
+        "alice,bob",
+        true,
+      );
+
+      expect(result).toBe(true);
+      expect(coreWarningSpy).toHaveBeenCalledWith(
+        "⚠️ SECURITY WARNING: Bypassing write permission check for Alice due to allowed_non_write_users configuration. This should only be used for workflows with very limited permissions.",
+      );
+    });
+
+    test("should not let a [bot]-suffixed allowed_non_write_users entry match a user account", async () => {
+      // allowed_non_write_users is a list of user accounts; App actors are
+      // handled by the dedicated [bot] check and allowed_bots. A user can
+      // never carry a "[bot]" suffix, so such an entry must not grant anyone.
+      const mockOctokit = createMockOctokit("read");
+      const context = createContext();
+      context.actor = "alice";
+
+      const result = await checkWritePermissions(
+        mockOctokit,
+        context,
+        "alice[bot]",
+        true,
+      );
+
+      expect(result).toBe(false);
+      expect(coreWarningSpy).toHaveBeenCalledWith(
+        "Actor has insufficient permissions: read",
+      );
+    });
+
+    test("should not match allowed_non_write_users entries that merely share a prefix", async () => {
+      const mockOctokit = createMockOctokit("read");
+      const context = createContext();
+      context.actor = "alice";
+
+      const result = await checkWritePermissions(
+        mockOctokit,
+        context,
+        "alice-admin,ALICE2",
+        true,
+      );
+
+      expect(result).toBe(false);
+      expect(coreWarningSpy).toHaveBeenCalledWith(
+        "Actor has insufficient permissions: read",
+      );
+    });
   });
 
   describe("non-[bot] actors (e.g. GitHub Copilot)", () => {

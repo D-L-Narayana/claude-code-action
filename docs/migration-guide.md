@@ -287,6 +287,20 @@ claude_args: |
       --model claude-4-0-sonnet@20250805
 ```
 
+### Microsoft Foundry
+
+```yaml
+- uses: anthropics/claude-code-action@v1
+  with:
+    use_foundry: "true"
+    claude_args: |
+      --model claude-sonnet-4-5
+  env:
+    ANTHROPIC_FOUNDRY_BASE_URL: https://my-resource.services.ai.azure.com
+```
+
+See [Cloud Providers](./cloud-providers.md) for the OIDC authentication steps each provider requires.
+
 ## MCP Configuration Migration
 
 ### Adding Custom MCP Servers

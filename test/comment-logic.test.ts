@@ -1,8 +1,10 @@
 import { describe, it, expect } from "bun:test";
 import {
   updateCommentBody,
+  truncateForGitHubComment,
   type CommentUpdateInput,
 } from "../src/github/operations/comment-logic";
+import { GITHUB_COMMENT_MAX_LENGTH } from "../src/github/constants";
 
 describe("updateCommentBody", () => {
   const baseInput = {
@@ -442,5 +444,103 @@ describe("updateCommentBody", () => {
       expect(result).not.toContain("claude/issue-123");
       expect(result).not.toContain("tree/claude/issue-123");
     });
+  });
+
+  describe("GitHub comment length limit", () => {
+    it("keeps an oversized body within the limit while preserving the header", () => {
+      const input: CommentUpdateInput = {
+        currentBody: "Claude Code is working…\n\n" + "x".repeat(70_000),
+        actionFailed: false,
+        executionDetails: { duration_ms: 65000 },
+        jobUrl: "https://github.com/owner/repo/actions/runs/123",
+        triggerUsername: "trigger-user",
+      };
+
+      const result = updateCommentBody(input);
+
+      expect(result.length).toBeLessThanOrEqual(GITHUB_COMMENT_MAX_LENGTH);
+      expect(result).toContain(
+        "**Claude finished @trigger-user's task in 1m 5s**",
+      );
+      expect(result).toContain(
+        "[View job](https://github.com/owner/repo/actions/runs/123)",
+      );
+      expect(result).toMatch(/…\[truncated \d+ characters\]…/);
+    });
+
+    it("does not touch a body that fits within the limit", () => {
+      const input: CommentUpdateInput = {
+        ...baseInput,
+        currentBody: "Claude Code is working…\n\n" + "x".repeat(1000),
+        triggerUsername: "trigger-user",
+      };
+
+      const result = updateCommentBody(input);
+
+      expect(result).not.toContain("truncated");
+      expect(result).toContain("x".repeat(1000));
+    });
+  });
+});
+
+describe("truncateForGitHubComment", () => {
+  // The marker always terminates a truncated body and carries the number of
+  // characters that were dropped from the original.
+  const marker = /\n\n…\[truncated (\d+) characters\]…$/;
+
+  it("returns the body unchanged when it is within the limit", () => {
+    const atLimit = "x".repeat(GITHUB_COMMENT_MAX_LENGTH);
+    expect(truncateForGitHubComment(atLimit)).toBe(atLimit);
+    expect(truncateForGitHubComment("short")).toBe("short");
+    expect(truncateForGitHubComment("")).toBe("");
+  });
+
+  it("keeps the header block intact and drops trailing content with a marker", () => {
+    const header =
+      "**Claude encountered an error after 45s** —— [View job](https://github.com/owner/repo/actions/runs/123)\n\n```\nFailed to fetch issue data\n```\n\n---\n";
+    const body = header + "y".repeat(70_000);
+
+    const result = truncateForGitHubComment(body);
+
+    expect(result.length).toBeLessThanOrEqual(GITHUB_COMMENT_MAX_LENGTH);
+    expect(result.startsWith(header)).toBe(true);
+    const match = result.match(marker);
+    expect(match).not.toBeNull();
+    // The marker reports exactly how many characters of the original are gone.
+    const dropped = Number(match![1]);
+    expect(dropped).toBeGreaterThan(0);
+    expect(result.length - match![0].length + dropped).toBe(body.length);
+  });
+
+  it("hard-cuts with the marker when the header alone exceeds the limit", () => {
+    const body = "**Claude** " + "h".repeat(100) + "\n\n---\n" + "c".repeat(10);
+
+    const result = truncateForGitHubComment(body, 60);
+
+    expect(result.length).toBeLessThanOrEqual(60);
+    expect(result.startsWith("**Claude** ")).toBe(true);
+    expect(result).toMatch(marker);
+  });
+
+  it("does not split a surrogate pair at the cut", () => {
+    // One BMP character followed by 40,000 emoji (80,001 UTF-16 code units):
+    // every pair starts at an odd index, so a naive even-length cut would land
+    // between a high and its low surrogate and send an invalid code point.
+    const body = "a" + "😀".repeat(40_000);
+
+    const result = truncateForGitHubComment(body);
+
+    expect(result.length).toBeLessThanOrEqual(GITHUB_COMMENT_MAX_LENGTH);
+    expect(result).not.toMatch(/\p{Cs}/u);
+    expect(result).toMatch(marker);
+  });
+
+  it("closes an open code fence before the marker so it renders as text", () => {
+    const body = "Header\n\n---\n```text\n" + "z".repeat(70_000);
+
+    const result = truncateForGitHubComment(body);
+
+    expect(result.length).toBeLessThanOrEqual(GITHUB_COMMENT_MAX_LENGTH);
+    expect(result).toMatch(/\n```\n\n…\[truncated \d+ characters\]…$/);
   });
 });

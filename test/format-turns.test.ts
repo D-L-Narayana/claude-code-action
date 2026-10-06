@@ -8,10 +8,12 @@ import {
   detectContentType,
   formatResultContent,
   formatToolWithResult,
+  truncateForStepSummary,
   type Turn,
   type ToolUse,
   type ToolResult,
 } from "../src/entrypoints/format-turns";
+import { GITHUB_STEP_SUMMARY_MAX_BYTES } from "../src/github/constants";
 
 describe("detectContentType", () => {
   test("detects JSON objects", () => {
@@ -661,5 +663,129 @@ describe("credential redaction", () => {
 
     expect(result).toContain("[REDACTED_ANTHROPIC_KEY]");
     expect(result).not.toContain(key);
+  });
+});
+
+describe("step summary size cap", () => {
+  // The note always terminates a truncated report and carries the number of
+  // UTF-8 bytes that were left out.
+  const note =
+    /\n\n---\n\*Report truncated: (\d+) bytes omitted to stay within the GitHub step summary limit\.\*\n$/;
+
+  function toolCall(id: string, content: string, isError = false): Turn[] {
+    return [
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id,
+              name: "Bash",
+              input: { command: `cat ${id}.log` },
+            },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: id,
+              content,
+              is_error: isError,
+            },
+          ],
+        },
+      },
+    ];
+  }
+
+  test("caps the report when a single oversized tool result overflows the limit", () => {
+    // Error results are rendered verbatim (successful results are already cut
+    // at 3,000 characters), so one 2,000,000-character error output is enough
+    // to push the report past the 1 MiB step summary limit.
+    const data = toolCall("toolu_huge", "E".repeat(2_000_000), true);
+
+    const result = formatTurnsFromData(data);
+
+    expect(Buffer.byteLength(result, "utf8")).toBeLessThanOrEqual(
+      GITHUB_STEP_SUMMARY_MAX_BYTES,
+    );
+    expect(result).toMatch(note);
+    expect(result.startsWith("## Claude Code Report")).toBe(true);
+  });
+
+  test("caps the report when many tool results add up past the limit", () => {
+    // 500 results of 3,000 characters each: individually within the per-result
+    // cut, together about 1.5 MB of rendered markdown.
+    const data: Turn[] = [];
+    for (let i = 0; i < 500; i++) {
+      data.push(...toolCall(`toolu_${i}`, "A".repeat(3000)));
+    }
+
+    const result = formatTurnsFromData(data);
+
+    expect(Buffer.byteLength(result, "utf8")).toBeLessThanOrEqual(
+      GITHUB_STEP_SUMMARY_MAX_BYTES,
+    );
+    expect(result).toMatch(note);
+    expect(result).toContain("### 🔧 `Bash`");
+  });
+
+  test("leaves a normal-sized report untouched and byte-identical to the fixture", () => {
+    const jsonPath = join(__dirname, "fixtures", "sample-turns.json");
+    const expectedPath = join(
+      __dirname,
+      "fixtures",
+      "sample-turns-expected-output.md",
+    );
+    const jsonData = JSON.parse(readFileSync(jsonPath, "utf-8"));
+    const expectedBytes = Buffer.from(
+      readFileSync(expectedPath, "utf-8").trim(),
+      "utf8",
+    );
+
+    const actual = formatTurnsFromData(jsonData);
+
+    expect(actual).not.toContain("Report truncated");
+    expect(Buffer.from(actual.trim(), "utf8").equals(expectedBytes)).toBe(true);
+  });
+
+  test("truncateForStepSummary returns the input unchanged at exactly the limit", () => {
+    const markdown = "a".repeat(1024);
+    expect(truncateForStepSummary(markdown, 1024)).toBe(markdown);
+  });
+
+  test("truncateForStepSummary cuts on a character boundary and reports the omitted bytes", () => {
+    // Two-byte characters: a byte-based cut must not split one in half.
+    const markdown = "é".repeat(1000);
+
+    const result = truncateForStepSummary(markdown, 1500);
+
+    expect(Buffer.byteLength(result, "utf8")).toBeLessThanOrEqual(1500);
+    expect(result).not.toContain("�");
+    const match = result.match(note);
+    expect(match).not.toBeNull();
+    const omitted = Number(match![1]);
+    expect(omitted).toBeGreaterThan(0);
+    expect(
+      Buffer.byteLength(result, "utf8") -
+        Buffer.byteLength(match![0], "utf8") +
+        omitted,
+    ).toBe(Buffer.byteLength(markdown, "utf8"));
+  });
+
+  test("truncateForStepSummary closes an open code fence before the note", () => {
+    const markdown = "```text\n" + "x".repeat(5000);
+
+    const result = truncateForStepSummary(markdown, 1000);
+
+    expect(Buffer.byteLength(result, "utf8")).toBeLessThanOrEqual(1000);
+    expect(result).toMatch(
+      /\n```\n\n---\n\*Report truncated: \d+ bytes omitted/,
+    );
   });
 });

@@ -2,10 +2,9 @@ import { checkHumanActor } from "../../github/validation/actor";
 import { createInitialComment } from "../../github/operations/comments/create-initial";
 import { setupBranch } from "../../github/operations/branch";
 import {
-  configureGitAuth,
-  replaceCheckoutCredentials,
-  setupSshSigning,
-} from "../../github/operations/git-config";
+  configureGitAuthForMode,
+  resolveGitAuthStrategy,
+} from "../shared/git-auth";
 import { prepareMcpConfig } from "../../mcp/install-mcp-server";
 import {
   fetchGitHubData,
@@ -29,10 +28,18 @@ export async function prepareTagMode({
   context,
   octokit,
   githubToken,
+  onTrackingComment,
 }: {
   context: GitHubContext;
   octokit: Octokits;
   githubToken: string;
+  /**
+   * Invoked with the tracking comment id as soon as the comment exists. The
+   * id is also returned, but a later prepare step may throw before that
+   * return happens; the callback lets the caller still finalize the comment
+   * instead of leaving it at "Claude Code is working…".
+   */
+  onTrackingComment?: (commentId: number) => void;
 }) {
   // Tag mode only handles entity-based events
   if (!isEntityContext(context)) {
@@ -45,6 +52,7 @@ export async function prepareTagMode({
   // Create initial tracking comment
   const commentData = await createInitialComment(octokit.rest, context);
   const commentId = commentData.id;
+  onTrackingComment?.(commentId);
 
   const triggerTime = await resolveTriggerTimestamp(context, octokit);
   const originalTitle = extractOriginalTitle(context);
@@ -66,50 +74,11 @@ export async function prepareTagMode({
   // Setup branch
   const branchInfo = await setupBranch(octokit, githubData, context);
 
-  // Configure git authentication
-  // SSH signing takes precedence if provided
-  const useSshSigning = !!context.inputs.sshSigningKey;
-  const useApiCommitSigning = context.inputs.useCommitSigning && !useSshSigning;
-
-  if (useSshSigning) {
-    // Setup SSH signing for commits
-    await setupSshSigning(context.inputs.sshSigningKey);
-
-    // Still configure git auth for push operations (user/email and remote URL)
-    const user = {
-      login: context.inputs.botName,
-      id: parseInt(context.inputs.botId),
-    };
-    try {
-      await configureGitAuth(githubToken, context, user);
-    } catch (error) {
-      console.error("Failed to configure git authentication:", error);
-      throw error;
-    }
-  } else if (!useApiCommitSigning) {
-    // Use bot_id and bot_name from inputs directly
-    const user = {
-      login: context.inputs.botName,
-      id: parseInt(context.inputs.botId),
-    };
-
-    try {
-      await configureGitAuth(githubToken, context, user);
-    } catch (error) {
-      console.error("Failed to configure git authentication:", error);
-      throw error;
-    }
-  } else {
-    // Commits go through the GitHub API, so no git user setup is needed, but
-    // the credential actions/checkout left in git config should still be
-    // replaced with the action's own.
-    try {
-      await replaceCheckoutCredentials(githubToken, context);
-    } catch (error) {
-      console.error("Failed to configure git credentials:", error);
-      throw error;
-    }
-  }
+  // Configure git authentication (shared with agent mode); any failure aborts
+  // the prepare phase. The strategy also decides which tools Claude gets below.
+  await configureGitAuthForMode({ context, githubToken, mode: "tag" });
+  const useApiCommitSigning =
+    resolveGitAuthStrategy(context.inputs) === "api-commit-signing";
 
   // Create prompt file
   await createPrompt(

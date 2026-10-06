@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { spawnSync } from "child_process";
-import { buildInstallCommand } from "../src/entrypoints/run";
+import { buildInstallCommand } from "../src/install/claude-code-installer";
 
 describe("buildInstallCommand (regression for #1136)", () => {
   it("includes the pinned claude version in the bash -s args", () => {

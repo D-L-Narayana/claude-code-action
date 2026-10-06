@@ -52,7 +52,9 @@ async function validateAndPreparePrompt(
     throw new Error("Prompt is empty. Please provide a non-empty prompt.");
   }
 
-  const inlinePath = "/tmp/claude-action/prompt.txt";
+  // RUNNER_TEMP is the per-job scratch directory on GitHub Actions runners;
+  // fall back to /tmp when running outside Actions (e.g. locally).
+  const inlinePath = `${process.env.RUNNER_TEMP || "/tmp"}/claude-action/prompt.txt`;
   return {
     type: "inline",
     path: inlinePath,

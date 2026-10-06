@@ -17,6 +17,7 @@ describe("Agent Mode", () => {
   let setOutputSpy: any;
   let configureGitAuthSpy: any;
   let replaceCheckoutCredentialsSpy: any;
+  let setupSshSigningSpy: any;
 
   beforeEach(() => {
     exportVariableSpy = spyOn(core, "exportVariable").mockImplementation(
@@ -34,6 +35,9 @@ describe("Agent Mode", () => {
       gitConfig,
       "replaceCheckoutCredentials",
     ).mockImplementation(async () => {});
+    setupSshSigningSpy = spyOn(gitConfig, "setupSshSigning").mockImplementation(
+      async () => {},
+    );
   });
 
   afterEach(() => {
@@ -41,10 +45,12 @@ describe("Agent Mode", () => {
     setOutputSpy?.mockClear();
     configureGitAuthSpy?.mockClear();
     replaceCheckoutCredentialsSpy?.mockClear();
+    setupSshSigningSpy?.mockClear();
     exportVariableSpy?.mockRestore();
     setOutputSpy?.mockRestore();
     configureGitAuthSpy?.mockRestore();
     replaceCheckoutCredentialsSpy?.mockRestore();
+    setupSshSigningSpy?.mockRestore();
   });
 
   test("prepareAgentMode is exported as a function", () => {
@@ -317,6 +323,32 @@ describe("Agent Mode", () => {
         "test-token",
         context,
       );
+      expect(setupSshSigningSpy).not.toHaveBeenCalled();
+    });
+
+    test("sets up SSH signing before git auth when ssh_signing_key is provided", async () => {
+      const sshSigningKey =
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----";
+      // ssh_signing_key takes precedence over use_commit_signing
+      const context = createMockAutomationContext({
+        eventName: "workflow_dispatch",
+        inputs: { sshSigningKey, useCommitSigning: true },
+      });
+
+      await prepareAgentMode({
+        context,
+        octokit: mockOctokit,
+        githubToken: "test-token",
+      });
+
+      expect(setupSshSigningSpy).toHaveBeenCalledTimes(1);
+      expect(setupSshSigningSpy).toHaveBeenCalledWith(sshSigningKey);
+      expect(configureGitAuthSpy).toHaveBeenCalledTimes(1);
+      expect(configureGitAuthSpy).toHaveBeenCalledWith("test-token", context, {
+        login: context.inputs.botName,
+        id: parseInt(context.inputs.botId),
+      });
+      expect(replaceCheckoutCredentialsSpy).not.toHaveBeenCalled();
     });
   });
 });

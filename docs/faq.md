@@ -116,16 +116,17 @@ Claude's branch behavior depends on the context:
 
 ### Why are my commits shallow/missing history?
 
-For performance, Claude uses shallow clones:
+For performance, Claude limits how much history it fetches — but only when the checkout is already shallow (the `actions/checkout` default of `fetch-depth: 1`):
 
-- PRs: `--depth=20` (last 20 commits)
-- New branches: `--depth=1` (single commit)
+- Open PRs: `--depth=N`, where N is the PR's commit count or 20, whichever is larger
+- New branches (issues, closed or merged PRs): `--depth=1`
 
-If you need full history, you can configure this in your workflow before calling Claude in the `actions/checkout` step.
+A checkout that already has the full history is never truncated. If you need the full history, fetch it in the `actions/checkout` step before calling Claude:
 
-```
+```yaml
 - uses: actions/checkout@v6
-  depth: 0 # will fetch full repo history
+  with:
+    fetch-depth: 0 # full history; the action then fetches without a depth limit
 ```
 
 ## Configuration and Tools
@@ -193,18 +194,27 @@ Comments appear as claude[bot] when the action uses its built-in authentication.
 
 ### What MCP servers are available by default?
 
-Claude Code Action automatically configures two MCP servers:
+The action ships five built-in MCP servers. Which ones are configured for a run depends on the mode and on the tools you allow (the logic lives in `src/mcp/install-mcp-server.ts`):
 
-1. **GitHub MCP server**: For GitHub API operations
-2. **File operations server**: For advanced file manipulation
+| Server                  | Tools                                                                                                            | Configured when                                                                                                                                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `github_comment`        | `mcp__github_comment__update_claude_comment`                                                                     | Always in tag mode (it updates the tracking comment). In agent mode only when a `mcp__github_comment__*` tool is in `--allowedTools`                                                                                         |
+| `github_file_ops`       | `mcp__github_file_ops__commit_files`, `mcp__github_file_ops__delete_files`                                       | `use_commit_signing: true` — commits are created through the GitHub API so they are signed                                                                                                                                   |
+| `github_inline_comment` | `mcp__github_inline_comment__create_inline_comment`                                                              | Pull requests only, when a `mcp__github_inline_comment__*` or `mcp__github__*` tool is allowed                                                                                                                               |
+| `github_ci`             | `mcp__github_ci__get_ci_status`, `mcp__github_ci__get_workflow_run_details`, `mcp__github_ci__download_job_log`  | Pull requests only, when the workflow token has `actions: read` (in agent mode a `mcp__github_ci__*` tool must also be allowed). If the permission is missing, the server is skipped and a warning is written to the job log |
+| `github`                | `mcp__github__*` — the [official GitHub MCP server](https://github.com/github/github-mcp-server), run via Docker | When a `mcp__github__*` tool is allowed                                                                                                                                                                                      |
 
-However, tools from these servers still need to be explicitly allowed via `claude_args` with `--allowedTools`.
+Tag mode always allows the `github_comment` and `github_ci` tools listed above (and the `github_file_ops` tools when `use_commit_signing` is on). Every other MCP tool must be allowed explicitly via `claude_args` with `--allowedTools`. Servers you add with `--mcp-config` are merged with the built-in ones — see [Using Custom MCP Configuration](./configuration.md#using-custom-mcp-configuration).
 
 ## Troubleshooting
 
 ### How can I debug what Claude is doing?
 
 Check the GitHub Action log for Claude's run for the full execution trace.
+
+### Why does Claude's comment end with "…[truncated N characters]…"?
+
+GitHub rejects comment bodies longer than 65,536 characters, so the action cuts the body and appends a visible marker rather than failing the update. Very long issue or PR threads are likewise budgeted before they are sent to Claude — older comments are replaced by `[… N earlier comments omitted …]` — and the step-summary report is capped at 1 MiB. See [Limits and Safeguards](./limits.md) for every limit and for adjusting the prompt budget with `CLAUDE_PROMPT_MAX_CHARS`.
 
 ### Why can't I trigger Claude with `@claude-mention` or `claude!`?
 

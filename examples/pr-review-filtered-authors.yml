@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write # gh pr comment / inline review comments
       id-token: write
     steps:
       - name: Checkout repository

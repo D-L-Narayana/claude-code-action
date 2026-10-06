@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -102,7 +102,9 @@ jobs:
         uses: anthropics/claude-code-base-action@beta
         with:
           prompt_file: /tmp/claude-prompts/triage-prompt.txt
-          allowed_tools: "Bash(gh label list),mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__update_issue,mcp__github__search_issues,mcp__github__list_issues"
           claude_args: |
             --mcp-config /tmp/mcp-config/mcp-servers.json
+            --allowedTools "Bash(gh label list),mcp__github__get_issue,mcp__github__get_issue_comments,mcp__github__update_issue,mcp__github__search_issues,mcp__github__list_issues"
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # used by `gh label list`
